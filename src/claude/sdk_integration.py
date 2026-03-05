@@ -405,6 +405,12 @@ class ClaudeSDKManager:
             max_attempts = max(1, self.config.claude_retry_max_attempts)
 
             for attempt in range(max_attempts):
+                # Reset message accumulator each attempt so that a failed attempt
+                # does not pollute the next one with partial/duplicate messages.
+                # _run_client() closes over `messages` by reference (late-binding
+                # closure), so clearing it here is seen by every new call.
+                messages.clear()
+
                 if attempt > 0:
                     delay = min(
                         self.config.claude_retry_base_delay
@@ -418,7 +424,6 @@ class ClaudeSDKManager:
                         delay_seconds=delay,
                     )
                     await asyncio.sleep(delay)
-                    messages.clear()
 
                 run_task = asyncio.create_task(_run_client())
 
@@ -433,6 +438,8 @@ class ClaudeSDKManager:
 
                     interrupt_watcher = asyncio.create_task(_cancel_on_interrupt())
 
+                # Note: asyncio.TimeoutError is intentionally NOT retried —
+                # it reflects a user-configured hard limit.
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(run_task),
