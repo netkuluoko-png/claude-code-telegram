@@ -33,6 +33,5 @@ RUN useradd -m -s /bin/bash claude && \
     mkdir -p /app/data && \
     chown -R claude:claude /app /project
 
-USER claude
-
+# Entrypoint runs as root to fix volume permissions, then drops to claude user
 CMD ["./entrypoint.sh"]
