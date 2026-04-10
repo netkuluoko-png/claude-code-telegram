@@ -1748,9 +1748,10 @@ class MessageOrchestrator:
         # Fetch first prompt for each session as label
         first_prompts: dict[str, str] = {}
         storage = context.bot_data.get("storage")
-        if storage:
+        db = getattr(storage, "db_manager", None) if storage else None
+        if db:
             try:
-                async with storage.get_connection() as conn:
+                async with db.get_connection() as conn:
                     for s in sessions:
                         if not s.session_id:
                             continue
@@ -1848,9 +1849,10 @@ class MessageOrchestrator:
         # Fetch last Claude response for context
         last_response = ""
         storage = context.bot_data.get("storage")
-        if storage:
+        db = getattr(storage, "db_manager", None) if storage else None
+        if db:
             try:
-                async with storage.get_connection() as conn:
+                async with db.get_connection() as conn:
                     cursor = await conn.execute(
                         "SELECT response FROM messages "
                         "WHERE session_id = ? AND response IS NOT NULL "
