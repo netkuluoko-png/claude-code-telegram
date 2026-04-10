@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.env.example
+.git/
+.github/
+tests/
+docs/
+*.md
+!README.md
+.pre-commit-config.yaml
+.mypy_cache/
+.pytest_cache/
+htmlcov/
