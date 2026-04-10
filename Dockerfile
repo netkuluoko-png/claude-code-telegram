@@ -24,9 +24,13 @@ COPY setup.cfg ./
 COPY entrypoint.sh ./
 RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
+# Unpack TGLogistAgent project into /project
+COPY project.tar.gz /tmp/project.tar.gz
+RUN mkdir -p /project && tar xzf /tmp/project.tar.gz -C /project/ && rm /tmp/project.tar.gz
+
 # Create non-root user
 RUN useradd -m -s /bin/bash claude && \
-    mkdir -p /project /app/data && \
+    mkdir -p /app/data && \
     chown -R claude:claude /app /project
 
 USER claude
