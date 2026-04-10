@@ -1845,13 +1845,41 @@ class MessageOrchestrator:
 
         await query.answer()
 
+        # Fetch last Claude response for context
+        last_response = ""
+        storage = context.bot_data.get("storage")
+        if storage:
+            try:
+                async with storage.get_connection() as conn:
+                    cursor = await conn.execute(
+                        "SELECT response FROM messages "
+                        "WHERE session_id = ? AND response IS NOT NULL "
+                        "ORDER BY timestamp DESC LIMIT 1",
+                        [session_id],
+                    )
+                    row = await cursor.fetchone()
+                    if row and row[0]:
+                        last_response = row[0]
+            except Exception:
+                pass
+
         rel = session.project_path.name
-        await query.edit_message_text(
-            f"\u2705 Resumed session <code>{escape_html(session.session_id[:8])}...</code>"
-            f" in <code>{escape_html(rel)}/</code>"
-            f"\n{session.message_count} msgs \u00b7 ${session.total_cost:.3f}",
-            parse_mode="HTML",
+        header = (
+            f"\u2705 Resumed session in <code>{escape_html(rel)}/</code>"
+            f"\n{session.message_count} msgs \u00b7 ${session.total_cost:.3f}"
         )
+
+        await query.edit_message_text(header, parse_mode="HTML")
+
+        # Send last Claude response as a separate message for context
+        if last_response:
+            preview = last_response[:4000]
+            if len(last_response) > 4000:
+                preview += "\n\n..."
+            await query.message.reply_text(
+                f"<b>Last response:</b>\n\n{escape_html(preview)}",
+                parse_mode="HTML",
+            )
 
     async def _handle_resume_page_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
