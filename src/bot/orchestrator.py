@@ -1745,6 +1745,26 @@ class MessageOrchestrator:
                 await target.reply_text(text, parse_mode="HTML")
             return
 
+        # Fetch first prompt for each session as label
+        first_prompts: dict[str, str] = {}
+        storage = context.bot_data.get("storage")
+        if storage:
+            try:
+                async with storage.get_connection() as conn:
+                    for s in sessions:
+                        if not s.session_id:
+                            continue
+                        cursor = await conn.execute(
+                            "SELECT prompt FROM messages WHERE session_id = ? "
+                            "ORDER BY timestamp ASC LIMIT 1",
+                            [s.session_id],
+                        )
+                        row = await cursor.fetchone()
+                        if row:
+                            first_prompts[s.session_id] = row[0]
+            except Exception:
+                pass  # fallback: no labels
+
         total = len(sessions)
         ps = self._RESUME_PAGE_SIZE
         max_page = (total - 1) // ps
@@ -1762,14 +1782,23 @@ class MessageOrchestrator:
             is_current = s.session_id == current_session_id
             marker = " \u2705" if is_current else ""
             last = s.last_used.strftime("%m-%d %H:%M")
+
+            # Session label from first user message
+            raw_label = first_prompts.get(s.session_id, "")
+            short_label = (raw_label[:40] + "...") if len(raw_label) > 40 else raw_label
+            label_line = f" <i>{escape_html(short_label)}</i>" if short_label else ""
+
             lines.append(
                 f"<b>{i}.</b>{marker} {last}"
                 f" \u00b7 {s.message_count} msgs"
                 f" \u00b7 ${s.total_cost:.3f}"
+                f"\n    {label_line}"
             )
-            label = f"{'[active] ' if is_current else ''}#{i} \u2014 {last}"
+            btn_label = short_label or last
+            if is_current:
+                btn_label = f"\u2705 {btn_label}"
             keyboard.append(
-                [InlineKeyboardButton(label, callback_data=f"resume:{s.session_id}")]
+                [InlineKeyboardButton(btn_label, callback_data=f"resume:{s.session_id}")]
             )
 
         # Pagination row
