@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "process-manager": {
+      "command": "python",
+      "args": ["-m", "src.process.mcp_server"],
+      "cwd": "/app"
+    }
+  }
+}

@@ -328,10 +328,7 @@ class MessageOrchestrator:
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
             ("resume", self.agentic_resume),
-            ("run", self.process_run),
-            ("ps", self.process_list),
-            ("kill", self.process_kill),
-            ("logs", self.process_logs),
+            ("process", self.process_dispatch),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -496,10 +493,7 @@ class MessageOrchestrator:
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("resume", "Browse & resume previous sessions"),
-                BotCommand("run", "Start a background process"),
-                BotCommand("ps", "List running processes"),
-                BotCommand("kill", "Kill a process by ID"),
-                BotCommand("logs", "View process output"),
+                BotCommand("process", "Manage processes: run/ps/kill/logs"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -1710,61 +1704,77 @@ class MessageOrchestrator:
             reply_markup=reply_markup,
         )
 
-    # ── Process management commands ────────────────────────────────────
+    # ── /process: background process management ────────────────────────
 
-    def _get_process_manager(self, context: ContextTypes.DEFAULT_TYPE):  # type: ignore[no-untyped-def]
-        """Get or create the ProcessManager singleton."""
+    def _get_pm(self) -> "ProcessManager":  # type: ignore[name-defined]
         from src.process.manager import ProcessManager
+        return ProcessManager()
 
-        pm = context.bot_data.get("process_manager")
-        if pm is None:
-            pm = ProcessManager()
-            context.bot_data["process_manager"] = pm
-        return pm
-
-    async def process_run(
+    async def process_dispatch(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """/run <command> — start a background process in current project dir."""
+        """/process <sub> — dispatch to run/ps/kill/logs/cleanup."""
         text = update.message.text or ""
-        parts = text.split(None, 1)
-        if len(parts) < 2:
+        parts = text.split(None, 2)
+        sub = parts[1] if len(parts) > 1 else ""
+        rest = parts[2] if len(parts) > 2 else ""
+
+        if sub == "run":
+            await self._proc_run(update, context, rest)
+        elif sub == "ps":
+            await self._proc_ps(update)
+        elif sub == "kill":
+            await self._proc_kill(update, rest)
+        elif sub == "logs":
+            await self._proc_logs(update, rest)
+        elif sub == "cleanup":
+            pm = self._get_pm()
+            c = pm.cleanup_dead()
+            await update.message.reply_text(f"Removed {c} dead process(es).")
+        else:
             await update.message.reply_text(
-                "Usage: /run <command>\n\n"
-                "Examples:\n"
-                "  /run python bot.py\n"
-                "  /run npm start\n"
-                "  /run uvicorn main:app --port 8000"
+                "<b>/process</b> \u2014 manage background processes\n\n"
+                "<code>/process run &lt;cmd&gt;</code> \u2014 start\n"
+                "<code>/process run -n name &lt;cmd&gt;</code> \u2014 start with name\n"
+                "<code>/process ps</code> \u2014 list all\n"
+                "<code>/process kill &lt;id&gt;</code> \u2014 stop\n"
+                "<code>/process logs &lt;id&gt;</code> \u2014 output\n"
+                "<code>/process cleanup</code> \u2014 remove dead",
+                parse_mode="HTML",
             )
+
+    async def _proc_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str) -> None:
+        if not args:
+            await update.message.reply_text("Usage: /process run <command>")
             return
 
-        command = parts[1]
-        cwd = str(
-            context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-        )
-        pm = self._get_process_manager(context)
+        name = ""
+        command = args
+        if args.startswith("-n "):
+            parts = args[3:].split(None, 1)
+            if len(parts) == 2:
+                name, command = parts
+            else:
+                await update.message.reply_text("Usage: /process run -n <name> <command>")
+                return
 
+        cwd = str(context.user_data.get("current_directory", self.settings.approved_directory))
+        pm = self._get_pm()
         try:
-            mp = await pm.start(command, cwd)
+            entry = pm.start(command, cwd, name)
             await update.message.reply_text(
-                f"<b>Process #{mp.id} started</b>\n"
-                f"PID: {mp.pid}\n"
-                f"Dir: <code>{escape_html(cwd)}</code>\n"
+                f"\U0001f7e2 <b>#{entry.id} '{escape_html(entry.name)}'</b>\n"
+                f"PID: {entry.pid}\n"
+                f"Dir: <code>{escape_html(entry.cwd)}</code>\n"
                 f"Cmd: <code>{escape_html(command)}</code>",
                 parse_mode="HTML",
             )
         except Exception as e:
-            await update.message.reply_text(f"Failed to start: {e}")
+            await update.message.reply_text(f"Failed: {e}")
 
-    async def process_list(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """/ps — list all managed processes."""
-        pm = self._get_process_manager(context)
-        procs = pm.list()
-
+    async def _proc_ps(self, update: Update) -> None:
+        pm = self._get_pm()
+        procs = pm.list_all()
         if not procs:
             await update.message.reply_text("No processes.")
             return
@@ -1772,119 +1782,76 @@ class MessageOrchestrator:
         lines = ["<b>Processes</b>\n"]
         for p in procs:
             icon = "\U0001f7e2" if p.is_alive else "\U0001f534"
-            short_cmd = p.command[:35] + ("..." if len(p.command) > 35 else "")
             lines.append(
-                f"{icon} <b>#{p.id}</b> {escape_html(short_cmd)}\n"
-                f"    {p.status} \u00b7 {p.uptime} \u00b7 pid {p.pid}"
+                f"{icon} <b>#{p.id}</b> {escape_html(p.name)}\n"
+                f"    <code>{escape_html(p.command[:50])}</code>\n"
+                f"    {p.status} \u00b7 {p.uptime} \u00b7 pid {p.pid}\n"
+                f"    {escape_html(p.cwd)}"
             )
 
         keyboard = []
-        alive = pm.list_alive()
-        if alive:
-            for p in alive:
+        for p in procs:
+            if p.is_alive:
                 keyboard.append([
-                    InlineKeyboardButton(
-                        f"Logs #{p.id}", callback_data=f"plogs:{p.id}"
-                    ),
-                    InlineKeyboardButton(
-                        f"Kill #{p.id}", callback_data=f"pkill:{p.id}"
-                    ),
+                    InlineKeyboardButton(f"Logs #{p.id} {p.name}", callback_data=f"plogs:{p.id}"),
+                    InlineKeyboardButton(f"Kill #{p.id}", callback_data=f"pkill:{p.id}"),
                 ])
-
         markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-        await update.message.reply_text(
-            "\n".join(lines), parse_mode="HTML", reply_markup=markup
-        )
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=markup)
 
-    async def process_kill(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """/kill <id> — kill a background process."""
-        text = update.message.text or ""
-        parts = text.split()
-        if len(parts) < 2 or not parts[1].isdigit():
-            await update.message.reply_text("Usage: /kill <process_id>")
+    async def _proc_kill(self, update: Update, args: str) -> None:
+        if not args or not args.strip().isdigit():
+            await update.message.reply_text("Usage: /process kill <id>")
             return
-
-        proc_id = int(parts[1])
-        pm = self._get_process_manager(context)
-        mp = await pm.kill(proc_id)
-
-        if mp:
-            await update.message.reply_text(
-                f"\U0001f534 Process #{proc_id} killed ({escape_html(mp.command[:40])})",
-                parse_mode="HTML",
-            )
+        pm = self._get_pm()
+        entry = pm.kill(int(args.strip()))
+        if entry:
+            await update.message.reply_text(f"\U0001f534 #{entry.id} '{escape_html(entry.name)}' killed", parse_mode="HTML")
         else:
-            await update.message.reply_text(f"Process #{proc_id} not found.")
+            await update.message.reply_text(f"Process #{args.strip()} not found.")
 
-    async def process_logs(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """/logs <id> — view recent output of a process."""
-        text = update.message.text or ""
-        parts = text.split()
-        if len(parts) < 2 or not parts[1].isdigit():
-            await update.message.reply_text("Usage: /logs <process_id>")
+    async def _proc_logs(self, update: Update, args: str) -> None:
+        if not args or not args.strip().isdigit():
+            await update.message.reply_text("Usage: /process logs <id>")
             return
-
-        proc_id = int(parts[1])
-        pm = self._get_process_manager(context)
-        mp = pm.get(proc_id)
-
-        if not mp:
-            await update.message.reply_text(f"Process #{proc_id} not found.")
+        pm = self._get_pm()
+        entry = pm.get(int(args.strip()))
+        if not entry:
+            await update.message.reply_text(f"Process #{args.strip()} not found.")
             return
+        logs = entry.last_logs(50)
+        header = f"<b>#{entry.id} '{escape_html(entry.name)}'</b> [{entry.status}]\n\n"
+        await update.message.reply_text(header + f"<pre>{escape_html(logs[-3500:])}</pre>", parse_mode="HTML")
 
-        logs = mp.last_logs
-        if not logs:
-            logs = "(no output yet)"
-
-        header = f"<b>Logs #{proc_id}</b> [{mp.status}]\n\n"
-        body = escape_html(logs[-3500:])  # leave room for header
-        await update.message.reply_text(
-            header + f"<pre>{body}</pre>",
-            parse_mode="HTML",
-        )
+    # ── process callback handlers ────────────────────────────────────
 
     async def _handle_plogs_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle plogs: callbacks from /ps inline buttons."""
         query = update.callback_query
         await query.answer()
         proc_id = int(query.data.split(":", 1)[1])
-        pm = self._get_process_manager(context)
-        mp = pm.get(proc_id)
-
-        if not mp:
-            await query.edit_message_text(f"Process #{proc_id} not found.")
+        pm = self._get_pm()
+        entry = pm.get(proc_id)
+        if not entry:
+            await query.message.reply_text(f"Process #{proc_id} not found.")
             return
-
-        logs = mp.last_logs or "(no output yet)"
-        header = f"<b>Logs #{proc_id}</b> [{mp.status}]\n\n"
-        body = escape_html(logs[-3500])
-        await query.message.reply_text(
-            header + f"<pre>{body}</pre>", parse_mode="HTML"
-        )
+        logs = entry.last_logs(50)
+        header = f"<b>#{proc_id} '{escape_html(entry.name)}'</b> [{entry.status}]\n\n"
+        await query.message.reply_text(header + f"<pre>{escape_html(logs[-3500:])}</pre>", parse_mode="HTML")
 
     async def _handle_pkill_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle pkill: callbacks from /ps inline buttons."""
         query = update.callback_query
         proc_id = int(query.data.split(":", 1)[1])
-        pm = self._get_process_manager(context)
-        mp = await pm.kill(proc_id)
-
-        if mp:
-            await query.answer(f"Process #{proc_id} killed")
-            await query.edit_message_text(
-                f"\U0001f534 Process #{proc_id} killed: {escape_html(mp.command[:40])}",
-                parse_mode="HTML",
-            )
+        pm = self._get_pm()
+        entry = pm.kill(proc_id)
+        if entry:
+            await query.answer(f"#{proc_id} killed")
+            await query.edit_message_text(f"\U0001f534 #{proc_id} '{escape_html(entry.name)}' killed", parse_mode="HTML")
         else:
-            await query.answer("Process not found", show_alert=True)
+            await query.answer("Not found", show_alert=True)
 
     # ── /resume: browse & resume previous sessions ────────────────────
 
