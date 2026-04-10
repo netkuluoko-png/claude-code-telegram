@@ -327,6 +327,7 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("resume", self.agentic_resume),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -396,6 +397,22 @@ class MessageOrchestrator:
             )
         )
 
+        # Resume session callbacks
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_resume_callback),
+                pattern=r"^resume:",
+            )
+        )
+
+        # Resume pagination callbacks
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_resume_page_callback),
+                pattern=r"^rpage:",
+            )
+        )
+
         logger.info("Agentic handlers registered")
 
     def _register_classic_handlers(self, app: Application) -> None:
@@ -460,6 +477,7 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("resume", "Browse & resume previous sessions"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -1669,6 +1687,151 @@ class MessageOrchestrator:
             parse_mode="HTML",
             reply_markup=reply_markup,
         )
+
+    # ── /resume: browse & resume previous sessions ────────────────────
+
+    _RESUME_PAGE_SIZE = 5
+
+    async def agentic_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """List previous sessions for the current project directory."""
+        await self._send_resume_page(update.message, context, page=0)
+
+    async def _send_resume_page(
+        self,
+        target,  # type: ignore[no-untyped-def]
+        context: ContextTypes.DEFAULT_TYPE,
+        page: int,
+        edit: bool = False,
+    ) -> None:
+        """Build and send/edit a paginated session list."""
+        user_id = (
+            target.from_user.id if hasattr(target, "from_user") else target.chat.id
+        )
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directory
+        )
+        current_session_id = context.user_data.get("claude_session_id")
+
+        session_mgr = context.bot_data.get("session_manager")
+        if not session_mgr:
+            text = "Session manager not available."
+            if edit:
+                await target.edit_message_text(text)
+            else:
+                await target.reply_text(text)
+            return
+
+        # Get all active sessions for this user
+        all_sessions = await session_mgr._get_user_sessions(user_id)
+
+        # Filter: same project directory, not expired
+        sessions = [
+            s
+            for s in all_sessions
+            if str(s.project_path) == str(current_dir)
+            and not s.is_expired(self.settings.session_timeout_hours)
+        ]
+
+        if not sessions:
+            rel = current_dir.name if current_dir != self.settings.approved_directory else str(current_dir)
+            text = f"No sessions for <code>{escape_html(rel)}/</code>"
+            if edit:
+                await target.edit_message_text(text, parse_mode="HTML")
+            else:
+                await target.reply_text(text, parse_mode="HTML")
+            return
+
+        total = len(sessions)
+        ps = self._RESUME_PAGE_SIZE
+        max_page = (total - 1) // ps
+        page = max(0, min(page, max_page))
+        page_sessions = sessions[page * ps : (page + 1) * ps]
+
+        rel_dir = current_dir.name if current_dir != self.settings.approved_directory else str(current_dir)
+        lines = [
+            f"<b>Sessions for</b> <code>{escape_html(rel_dir)}/</code>"
+            f" ({total} total)\n"
+        ]
+
+        keyboard = []
+        for i, s in enumerate(page_sessions, start=page * ps + 1):
+            is_current = s.session_id == current_session_id
+            marker = " \u2705" if is_current else ""
+            last = s.last_used.strftime("%m-%d %H:%M")
+            lines.append(
+                f"<b>{i}.</b>{marker} {last}"
+                f" \u00b7 {s.message_count} msgs"
+                f" \u00b7 ${s.total_cost:.3f}"
+            )
+            label = f"{'[active] ' if is_current else ''}#{i} \u2014 {last}"
+            keyboard.append(
+                [InlineKeyboardButton(label, callback_data=f"resume:{s.session_id}")]
+            )
+
+        # Pagination row
+        nav_row = []
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton("\u25c0 Back", callback_data=f"rpage:{page - 1}")
+            )
+        if page < max_page:
+            nav_row.append(
+                InlineKeyboardButton("Next \u25b6", callback_data=f"rpage:{page + 1}")
+            )
+        if nav_row:
+            keyboard.append(nav_row)
+
+        markup = InlineKeyboardMarkup(keyboard)
+        text = "\n".join(lines)
+
+        if edit:
+            await target.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await target.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_resume_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Resume a selected session."""
+        query = update.callback_query
+        session_id = query.data.split(":", 1)[1]
+        user_id = query.from_user.id
+
+        session_mgr = context.bot_data.get("session_manager")
+        if not session_mgr:
+            await query.answer("Session manager not available", show_alert=True)
+            return
+
+        session = await session_mgr.storage.load_session(session_id, user_id)
+        if not session:
+            await query.answer("Session not found or expired", show_alert=True)
+            return
+
+        context.user_data["claude_session_id"] = session.session_id
+        context.user_data["current_directory"] = session.project_path
+
+        await query.answer()
+
+        rel = session.project_path.name
+        await query.edit_message_text(
+            f"\u2705 Resumed session <code>{escape_html(session.session_id[:8])}...</code>"
+            f" in <code>{escape_html(rel)}/</code>"
+            f"\n{session.message_count} msgs \u00b7 ${session.total_cost:.3f}",
+            parse_mode="HTML",
+        )
+
+    async def _handle_resume_page_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle pagination for /resume."""
+        query = update.callback_query
+        await query.answer()
+        page = int(query.data.split(":", 1)[1])
+        await self._send_resume_page(query, context, page=page, edit=True)
+
+    # ── stop callback ────────────────────────────────────────────────
 
     async def _handle_stop_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
