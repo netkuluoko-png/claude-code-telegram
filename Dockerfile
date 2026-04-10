@@ -10,20 +10,15 @@ RUN apt-get update && \
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Install Poetry 2.x
-RUN pip install --no-cache-dir "poetry>=2.0"
-
 WORKDIR /app
 
-# Copy dependency files first (Docker cache layer)
-COPY pyproject.toml poetry.lock setup.cfg ./
-
-# Install production dependencies only (no virtualenv in container)
-RUN poetry config virtualenvs.create false && \
-    poetry install --only main --no-interaction --no-ansi
+# Install Python dependencies via pip (no Poetry needed)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
 COPY src/ ./src/
+COPY setup.cfg ./
 
 # Copy entrypoint
 COPY entrypoint.sh ./
