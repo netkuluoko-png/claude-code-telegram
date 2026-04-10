@@ -9,4 +9,7 @@ else
     echo "WARNING: CLAUDE_CREDENTIALS_B64 not set"
 fi
 
-exec python -m src.main
+# Create data dir if needed
+mkdir -p /app/data
+
+exec python -c "from src.main import run; run()"

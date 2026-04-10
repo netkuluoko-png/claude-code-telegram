@@ -10,21 +10,20 @@ RUN apt-get update && \
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Install Poetry
-RUN pip install --no-cache-dir poetry
+# Install Poetry 2.x
+RUN pip install --no-cache-dir "poetry>=2.0"
 
 WORKDIR /app
 
 # Copy dependency files first (Docker cache layer)
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml poetry.lock setup.cfg ./
 
-# Install production dependencies only
+# Install production dependencies only (no virtualenv in container)
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-dev --no-interaction --no-ansi
+    poetry install --only main --no-interaction --no-ansi
 
 # Copy source code
 COPY src/ ./src/
-COPY config/ ./config/
 
 # Copy entrypoint
 COPY entrypoint.sh ./
@@ -36,8 +35,5 @@ RUN useradd -m -s /bin/bash claude && \
     chown -R claude:claude /app /project
 
 USER claude
-
-# Create data dir for SQLite
-RUN mkdir -p /app/data
 
 CMD ["./entrypoint.sh"]
