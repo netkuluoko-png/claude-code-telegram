@@ -1714,14 +1714,16 @@ class MessageOrchestrator:
         )
         current_session_id = context.user_data.get("claude_session_id")
 
-        session_mgr = context.bot_data.get("session_manager")
-        if not session_mgr:
+        claude_integration = context.bot_data.get("claude_integration")
+        if not claude_integration or not claude_integration.session_manager:
             text = "Session manager not available."
             if edit:
                 await target.edit_message_text(text)
             else:
                 await target.reply_text(text)
             return
+
+        session_mgr = claude_integration.session_manager
 
         # Get all active sessions for this user
         all_sessions = await session_mgr._get_user_sessions(user_id)
@@ -1799,12 +1801,12 @@ class MessageOrchestrator:
         session_id = query.data.split(":", 1)[1]
         user_id = query.from_user.id
 
-        session_mgr = context.bot_data.get("session_manager")
-        if not session_mgr:
+        claude_integration = context.bot_data.get("claude_integration")
+        if not claude_integration or not claude_integration.session_manager:
             await query.answer("Session manager not available", show_alert=True)
             return
 
-        session = await session_mgr.storage.load_session(session_id, user_id)
+        session = await claude_integration.session_manager.storage.load_session(session_id, user_id)
         if not session:
             await query.answer("Session not found or expired", show_alert=True)
             return
