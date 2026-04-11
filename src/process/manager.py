@@ -121,7 +121,9 @@ class ProcessManager:
             started_at=time.time(),
         )
 
-        state["processes"][str(proc_id)] = asdict(entry)
+        entry_dict = asdict(entry)
+        entry_dict["manually_stopped"] = False
+        state["processes"][str(proc_id)] = entry_dict
         self._save_state(state)
 
         logger.info("Process #%d '%s' started: pid=%d", proc_id, name, proc.pid)
@@ -153,6 +155,13 @@ class ProcessManager:
                 except (OSError, ProcessLookupError):
                     pass
 
+        # Позначити як зупинений вручну — не відновлювати при рестарті
+        state = self._load_state()
+        key = str(proc_id)
+        if key in state["processes"]:
+            state["processes"][key]["manually_stopped"] = True
+            self._save_state(state)
+
         logger.info("Process #%d killed (pid=%d)", proc_id, entry.pid)
         return entry
 
@@ -180,3 +189,53 @@ class ProcessManager:
         if dead:
             self._save_state(state)
         return len(dead)
+
+    def restore(self) -> list[ProcessEntry]:
+        """Restart processes that died from server restart (not manually killed).
+
+        Processes killed via kill() are marked manually_stopped=True and skipped.
+        All other dead processes are re-launched with the same command/cwd/name.
+        """
+        state = self._load_state()
+        restored: list[ProcessEntry] = []
+
+        for key, d in list(state["processes"].items()):
+            entry = self._entry_from_dict(d)
+
+            if entry.is_alive:
+                continue
+
+            if d.get("manually_stopped", False):
+                continue
+
+            logger.info(
+                "Restoring process #%d '%s': %s", entry.id, entry.name, entry.command
+            )
+
+            log_path = LOGS_DIR / f"{entry.id}.log"
+            try:
+                with open(log_path, "a") as log_file:
+                    log_file.write(
+                        f"\n--- Restored at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n"
+                    )
+                    proc = subprocess.Popen(
+                        entry.command,
+                        shell=True,
+                        cwd=entry.cwd,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+
+                state["processes"][key]["pid"] = proc.pid
+                state["processes"][key]["started_at"] = time.time()
+                restored.append(self._entry_from_dict(state["processes"][key]))
+
+                logger.info("Process #%d restored: new pid=%d", entry.id, proc.pid)
+            except Exception as exc:
+                logger.error("Failed to restore process #%d: %s", entry.id, exc)
+
+        if restored:
+            self._save_state(state)
+
+        return restored

@@ -66,5 +66,19 @@ chown -R claude:claude /home/claude/.claude
 export ENABLE_MCP="${ENABLE_MCP:-true}"
 export MCP_CONFIG_PATH="${MCP_CONFIG_PATH:-/app/mcp-process.json}"
 
+# Restore background processes from previous session (if any survived deploy)
+echo "Checking for processes to restore..."
+su claude -c "cd /app && PYTHONPATH=/app python -c '
+from src.process.manager import ProcessManager
+pm = ProcessManager()
+restored = pm.restore()
+if restored:
+    print(f\"Restored {len(restored)} process(es):\")
+    for p in restored:
+        print(f\"  #{p.id} {p.name!r} -> pid {p.pid}\")
+else:
+    print(\"No processes to restore.\")
+'"
+
 # Run as claude user
 exec su claude -c "python -c 'from src.main import run; run()'"

@@ -82,5 +82,22 @@ def process_cleanup() -> str:
     return f"Cleaned up {count} dead process(es)."
 
 
+@mcp.tool()
+def process_restore() -> str:
+    """Restart processes that died from server restart (not manually killed).
+
+    Processes stopped via process_kill are NOT restored.
+    Only processes that died unexpectedly (e.g. deploy, crash) are restarted.
+    """
+    restored = pm.restore()
+    if not restored:
+        return "No processes to restore (all alive or manually stopped)."
+
+    lines = []
+    for p in restored:
+        lines.append(f"🔄 #{p.id} '{p.name}' restored (new pid: {p.pid})")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
