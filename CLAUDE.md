@@ -113,7 +113,7 @@ MCP tools auto-register in every Claude session. How it works:
 
 To add a new MCP server:
 
-1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example)
+1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example). **Use `mcp.run(transport="stdio")`** — Claude CLI communicates via stdio, not HTTP
 2. Add it to `mcp-process.json` under `mcpServers`:
    ```json
    {
