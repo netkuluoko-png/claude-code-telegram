@@ -359,10 +359,13 @@ class ClaudeSDKManager:
             if mcp_servers:
                 options.mcp_servers = mcp_servers
                 logger.info(
-                    "MCP servers configured via options.mcp_servers",
+                    "MCP servers configured",
                     servers=list(mcp_servers.keys()),
-                    mcp_config=mcp_servers,
                 )
+
+            # Ensure .claude/settings.json with MCP config exists in working_directory
+            # so the CLI picks it up regardless of which project is active
+            self._ensure_mcp_settings(working_directory, mcp_servers)
 
             # Wire can_use_tool callback for preventive tool validation
             if self.security_validator:
@@ -766,6 +769,67 @@ class ClaudeSDKManager:
 
         except Exception as e:
             logger.warning("Stream callback failed", error=str(e))
+
+    @staticmethod
+    def _ensure_mcp_settings(
+        working_directory: Path, mcp_servers: Dict[str, Any]
+    ) -> None:
+        """Ensure .claude/settings.json with MCP config exists in working_directory.
+
+        The CLI reads MCP servers from project-level .claude/settings.json.
+        This creates or updates the file so MCP tools are available in any
+        project directory, not just those pre-configured by the entrypoint.
+        """
+        import json
+
+        if not mcp_servers:
+            return
+
+        settings_dir = Path(working_directory) / ".claude"
+        settings_path = settings_dir / "settings.json"
+
+        # Build desired MCP config
+        desired: Dict[str, Any] = {
+            "permissions": {
+                "allow": [
+                    f"mcp__{name}__*" for name in mcp_servers
+                ]
+            },
+            "mcpServers": mcp_servers,
+        }
+
+        # Merge with existing settings if present
+        existing: Dict[str, Any] = {}
+        if settings_path.exists():
+            try:
+                existing = json.loads(settings_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+
+            # Skip if MCP config already matches
+            if existing.get("mcpServers") == mcp_servers:
+                return
+
+        existing.setdefault("permissions", {}).setdefault("allow", [])
+        for perm in desired["permissions"]["allow"]:
+            if perm not in existing["permissions"]["allow"]:
+                existing["permissions"]["allow"].append(perm)
+        existing["mcpServers"] = mcp_servers
+
+        try:
+            settings_dir.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(json.dumps(existing, indent=2))
+            logger.info(
+                "MCP settings.json written",
+                path=str(settings_path),
+                servers=list(mcp_servers.keys()),
+            )
+        except OSError as e:
+            logger.warning(
+                "Failed to write MCP settings.json",
+                path=str(settings_path),
+                error=str(e),
+            )
 
     def _load_mcp_config(self, config_path: Path) -> Dict[str, Any]:
         """Load MCP server configuration from a JSON file.
