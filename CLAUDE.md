@@ -102,6 +102,31 @@ context.bot_data["security_validator"]
 
 Webhook authentication: GitHub HMAC-SHA256 signature verification, generic Bearer token for other providers, atomic deduplication via `webhook_events` table.
 
+### MCP Configuration
+
+MCP tools auto-register in every Claude session. How it works:
+
+1. `ClaudeSDKManager.execute_command()` auto-discovers `mcp-process.json` from the project root (`Path(__file__).parent.parent.parent`)
+2. The `cwd` in the config is overridden at runtime to the actual project root (works both in Docker `/app` and locally)
+3. User-configured MCP servers (`ENABLE_MCP=true` + `MCP_CONFIG_PATH`) are merged on top
+4. The merged dict is passed to `options.mcp_servers` in `ClaudeAgentOptions`
+
+To add a new MCP server:
+
+1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example)
+2. Add it to `mcp-process.json` under `mcpServers`:
+   ```json
+   {
+     "mcpServers": {
+       "process-manager": { "command": "python", "args": ["-m", "src.process.mcp_server"], "cwd": "/app" },
+       "my-server": { "command": "python", "args": ["-m", "src.mcp.my_server"], "cwd": "/app" }
+     }
+   }
+   ```
+3. Deploy — all new sessions will see the tools automatically
+
+**Do NOT** edit CLAUDE.md with CLI fallback commands as a workaround. If MCP tools are missing, fix the configuration in `sdk_integration.py` or `mcp-process.json`.
+
 ### Configuration
 
 Settings loaded from environment variables via Pydantic Settings. Required: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `APPROVED_DIRECTORY`. Key optional: `ALLOWED_USERS` (comma-separated Telegram IDs), `ANTHROPIC_API_KEY`, `ENABLE_MCP`, `MCP_CONFIG_PATH`.
