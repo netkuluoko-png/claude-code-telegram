@@ -11,8 +11,24 @@ else
 fi
 
 # Fix volume permissions (Railway volumes mount as root)
-mkdir -p /app/data
+mkdir -p /app/data /app/data/proc_logs
 chown -R claude:claude /app/data
+
+# Create MCP config for Claude Code in every project directory
+# so Claude Code sees process-manager tools in any session
+MCP_JSON='{"mcpServers":{"process-manager":{"command":"python","args":["-m","src.process.mcp_server"],"cwd":"/app"}}}'
+
+# Global: in approved directory
+echo "$MCP_JSON" > /project/.mcp.json
+
+# Also in each subdirectory
+for dir in /project/*/; do
+    if [ -d "$dir" ]; then
+        echo "$MCP_JSON" > "$dir/.mcp.json"
+    fi
+done
+
+chown -R claude:claude /project
 
 # Run as claude user
 exec su claude -c "python -c 'from src.main import run; run()'"
