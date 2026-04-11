@@ -114,16 +114,27 @@ MCP tools auto-register in every Claude session. How it works:
 To add a new MCP server:
 
 1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example). **Use `mcp.run(transport="stdio")`** — Claude CLI communicates via stdio, not HTTP
-2. Add it to `mcp-process.json` under `mcpServers`:
+2. Add it to `mcp-process.json` under `mcpServers`. **Must include `env.PYTHONPATH`** — the CLI ignores `cwd`, so without PYTHONPATH the module won't be importable:
    ```json
    {
      "mcpServers": {
-       "process-manager": { "command": "python", "args": ["-m", "src.process.mcp_server"], "cwd": "/app" },
-       "my-server": { "command": "python", "args": ["-m", "src.mcp.my_server"], "cwd": "/app" }
+       "process-manager": {
+         "command": "python",
+         "args": ["-m", "src.process.mcp_server"],
+         "cwd": "/app",
+         "env": { "PYTHONPATH": "/app" }
+       },
+       "my-server": {
+         "command": "python",
+         "args": ["-m", "src.mcp.my_server"],
+         "cwd": "/app",
+         "env": { "PYTHONPATH": "/app" }
+       }
      }
    }
    ```
-3. Deploy — all new sessions will see the tools automatically
+3. Also update `entrypoint.sh` — it writes `.claude/settings.json` with the same MCP config to project and user directories
+4. Deploy — all new sessions will see the tools automatically
 
 **Do NOT** edit CLAUDE.md with CLI fallback commands as a workaround. If MCP tools are missing, fix the configuration in `sdk_integration.py` or `mcp-process.json`.
 

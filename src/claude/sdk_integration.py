@@ -294,7 +294,7 @@ class ClaudeSDKManager:
 
             def _stderr_callback(line: str) -> None:
                 stderr_lines.append(line)
-                logger.info("Claude CLI stderr", line=line)
+                logger.debug("Claude CLI stderr", line=line)
 
             # Build system prompt, loading CLAUDE.md from working directory if present
             base_prompt = (
@@ -363,19 +363,6 @@ class ClaudeSDKManager:
                     servers=list(mcp_servers.keys()),
                     mcp_config=mcp_servers,
                 )
-
-            # Log settings.json locations for MCP debugging
-            settings_json_project = Path(working_directory) / ".claude" / "settings.json"
-            settings_json_user = Path.home() / ".claude" / "settings.json"
-            logger.info(
-                "MCP settings.json check",
-                project_exists=settings_json_project.exists(),
-                project_path=str(settings_json_project),
-                user_exists=settings_json_user.exists(),
-                user_path=str(settings_json_user),
-                setting_sources=options.setting_sources,
-                cwd=str(working_directory),
-            )
 
             # Wire can_use_tool callback for preventive tool validation
             if self.security_validator:
