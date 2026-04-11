@@ -28,7 +28,10 @@ for dir in /project /project/*/; do
     "process-manager": {
       "command": "python",
       "args": ["-m", "src.process.mcp_server"],
-      "cwd": "/app"
+      "cwd": "/app",
+      "env": {
+        "PYTHONPATH": "/app"
+      }
     }
   }
 }
@@ -49,7 +52,10 @@ cat > /home/claude/.claude/settings.json << 'MCPEOF'
     "process-manager": {
       "command": "python",
       "args": ["-m", "src.process.mcp_server"],
-      "cwd": "/app"
+      "cwd": "/app",
+      "env": {
+        "PYTHONPATH": "/app"
+      }
     }
   }
 }

@@ -349,6 +349,8 @@ class ClaudeSDKManager:
                 auto_mcp = self._load_mcp_config(process_mcp_path)
                 if "process-manager" in auto_mcp:
                     auto_mcp["process-manager"]["cwd"] = str(app_root)
+                    auto_mcp["process-manager"].setdefault("env", {})
+                    auto_mcp["process-manager"]["env"]["PYTHONPATH"] = str(app_root)
                 mcp_servers.update(auto_mcp)
 
             if self.config.enable_mcp and self.config.mcp_config_path:

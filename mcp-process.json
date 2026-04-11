@@ -3,7 +3,10 @@
     "process-manager": {
       "command": "python",
       "args": ["-m", "src.process.mcp_server"],
-      "cwd": "/app"
+      "cwd": "/app",
+      "env": {
+        "PYTHONPATH": "/app"
+      }
     }
   }
 }
