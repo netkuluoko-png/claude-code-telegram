@@ -119,7 +119,10 @@ def _tool_icon(name: str) -> str:
 
 
 # Available Claude models for /model command
+# 1M context models first (primary), then standard context
 _AVAILABLE_MODELS: List[Dict[str, str]] = [
+    {"id": "claude-sonnet-4-6[1m]", "label": "Sonnet 4.6 (1M)", "desc": "Fast & capable, 1M context"},
+    {"id": "claude-opus-4-6[1m]", "label": "Opus 4.6 (1M)", "desc": "Most intelligent, 1M context"},
     {"id": "claude-sonnet-4-6", "label": "Sonnet 4.6", "desc": "Fast & capable"},
     {"id": "claude-opus-4-6", "label": "Opus 4.6", "desc": "Most intelligent"},
     {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5", "desc": "Fastest & cheapest"},
