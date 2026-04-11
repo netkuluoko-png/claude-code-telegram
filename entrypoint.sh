@@ -14,28 +14,41 @@ fi
 mkdir -p /app/data /app/data/proc_logs
 chown -R claude:claude /app/data
 
-# Configure MCP servers via .claude/settings.json (project-level)
-# Claude CLI reads this when setting_sources=["project"]
+# Merge MCP servers into .claude/settings.json for all project directories
+# Uses Python to MERGE into existing settings (preserving permissions, hooks, etc.)
+# instead of overwriting them
 for dir in /project /project/*/; do
     if [ -d "$dir" ]; then
         mkdir -p "$dir/.claude"
-        cat > "$dir/.claude/settings.json" << 'MCPEOF'
-{
-  "permissions": {
-    "allow": ["mcp__process-manager__*"]
-  },
-  "mcpServers": {
-    "process-manager": {
-      "command": "python",
-      "args": ["-m", "src.process.mcp_server"],
-      "cwd": "/app",
-      "env": {
-        "PYTHONPATH": "/app"
-      }
+        python3 -c "
+import json, pathlib, sys
+settings_path = pathlib.Path('$dir/.claude/settings.json')
+existing = {}
+if settings_path.exists():
+    try:
+        existing = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+
+mcp_perms = ['mcp__process-manager__*', 'mcp__telegram__*']
+allow = existing.setdefault('permissions', {}).setdefault('allow', [])
+for p in mcp_perms:
+    if p not in allow:
+        allow.append(p)
+
+existing['mcpServers'] = {
+    'process-manager': {
+        'command': 'python', 'args': ['-m', 'src.process.mcp_server'],
+        'cwd': '/app', 'env': {'PYTHONPATH': '/app'}
+    },
+    'telegram': {
+        'command': 'python', 'args': ['-m', 'src.mcp.telegram_server'],
+        'cwd': '/app', 'env': {'PYTHONPATH': '/app'}
     }
-  }
 }
-MCPEOF
+settings_path.write_text(json.dumps(existing, indent=2))
+print(f'MCP merged into {settings_path}')
+"
     fi
 done
 
@@ -43,23 +56,35 @@ chown -R claude:claude /project
 
 # Also set user-level MCP config for claude user as fallback
 mkdir -p /home/claude/.claude
-cat > /home/claude/.claude/settings.json << 'MCPEOF'
-{
-  "permissions": {
-    "allow": ["mcp__process-manager__*"]
-  },
-  "mcpServers": {
-    "process-manager": {
-      "command": "python",
-      "args": ["-m", "src.process.mcp_server"],
-      "cwd": "/app",
-      "env": {
-        "PYTHONPATH": "/app"
-      }
+python3 -c "
+import json, pathlib
+settings_path = pathlib.Path('/home/claude/.claude/settings.json')
+existing = {}
+if settings_path.exists():
+    try:
+        existing = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+
+mcp_perms = ['mcp__process-manager__*', 'mcp__telegram__*']
+allow = existing.setdefault('permissions', {}).setdefault('allow', [])
+for p in mcp_perms:
+    if p not in allow:
+        allow.append(p)
+
+existing['mcpServers'] = {
+    'process-manager': {
+        'command': 'python', 'args': ['-m', 'src.process.mcp_server'],
+        'cwd': '/app', 'env': {'PYTHONPATH': '/app'}
+    },
+    'telegram': {
+        'command': 'python', 'args': ['-m', 'src.mcp.telegram_server'],
+        'cwd': '/app', 'env': {'PYTHONPATH': '/app'}
     }
-  }
 }
-MCPEOF
+settings_path.write_text(json.dumps(existing, indent=2))
+print(f'MCP merged into {settings_path}')
+"
 chown -R claude:claude /home/claude/.claude
 
 # Enable process manager MCP by default (Railway/Docker env vars take precedence)

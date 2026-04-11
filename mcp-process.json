@@ -7,6 +7,14 @@
       "env": {
         "PYTHONPATH": "/app"
       }
+    },
+    "telegram": {
+      "command": "python",
+      "args": ["-m", "src.mcp.telegram_server"],
+      "cwd": "/app",
+      "env": {
+        "PYTHONPATH": "/app"
+      }
     }
   }
 }

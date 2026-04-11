@@ -14,6 +14,15 @@ Background processes persist across Claude sessions. Use MCP tools to manage the
 
 Always use the process manager instead of running servers directly — direct processes die when the session ends.
 
+## Telegram Tools
+
+Send files and images directly to the user's Telegram chat:
+
+- `send_file_to_user(file_path, caption)` — send any file as a document attachment. Use when the user asks to receive, download, or get a file from the server. The file_path must be absolute and within the approved working directory. Max 50 MB.
+- `send_image_to_user(file_path, caption)` — send an image with inline preview. Supported formats: png, jpg, jpeg, gif, webp, bmp, svg.
+
+Both tools validate the file and queue it for delivery — the actual Telegram message is sent automatically after your response.
+
 ## Project Overview
 
 Telegram bot providing remote access to Claude Code. Python 3.10+, built with Poetry, using `python-telegram-bot` for Telegram and `claude-agent-sdk` for Claude Code integration.
@@ -113,7 +122,7 @@ MCP tools auto-register in every Claude session. How it works:
 
 To add a new MCP server:
 
-1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example). **Use `mcp.run(transport="stdio")`** — Claude CLI communicates via stdio, not HTTP
+1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example). **Import: `from fastmcp import FastMCP`** (NOT `from mcp.server.fastmcp` — that package is not installed). **Use `mcp.run(transport="stdio")`** — Claude CLI communicates via stdio, not HTTP
 2. Add it to `mcp-process.json` under `mcpServers`. **Must include `env.PYTHONPATH`** — the CLI ignores `cwd`, so without PYTHONPATH the module won't be importable:
    ```json
    {

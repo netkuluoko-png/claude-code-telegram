@@ -277,6 +277,7 @@ class ClaudeSDKManager:
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
+        model_override: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -321,7 +322,7 @@ class ClaudeSDKManager:
             # Build Claude Agent options
             options = ClaudeAgentOptions(
                 max_turns=self.config.claude_max_turns,
-                model=self.config.claude_model or None,
+                model=model_override or self.config.claude_model or None,
                 max_budget_usd=self.config.claude_max_cost_per_request,
                 cwd=str(working_directory),
                 allowed_tools=sdk_allowed_tools,
@@ -347,10 +348,11 @@ class ClaudeSDKManager:
             process_mcp_path = app_root / "mcp-process.json"
             if process_mcp_path.exists():
                 auto_mcp = self._load_mcp_config(process_mcp_path)
-                if "process-manager" in auto_mcp:
-                    auto_mcp["process-manager"]["cwd"] = str(app_root)
-                    auto_mcp["process-manager"].setdefault("env", {})
-                    auto_mcp["process-manager"]["env"]["PYTHONPATH"] = str(app_root)
+                # Fix cwd and PYTHONPATH for all auto-discovered servers
+                for server_name in auto_mcp:
+                    auto_mcp[server_name]["cwd"] = str(app_root)
+                    auto_mcp[server_name].setdefault("env", {})
+                    auto_mcp[server_name]["env"]["PYTHONPATH"] = str(app_root)
                 mcp_servers.update(auto_mcp)
 
             if self.config.enable_mcp and self.config.mcp_config_path:
@@ -860,6 +862,19 @@ Process Manager tools persist background processes across sessions:
 
 Always use the process manager instead of running servers directly — \
 direct processes die when the session ends.
+
+## Telegram Tools
+
+Send files and images directly to the user's Telegram chat:
+
+- `send_file_to_user(file_path, caption)` — send any file as a document attachment. \
+Use when the user asks to receive, download, or get a file from the server. \
+The file_path must be absolute and within the approved working directory. Max 50 MB.
+- `send_image_to_user(file_path, caption)` — send an image with inline preview. \
+Supported formats: png, jpg, jpeg, gif, webp, bmp, svg.
+
+Both tools validate the file and queue it for delivery — \
+the actual Telegram message is sent automatically after your response.
 
 ## How MCP is Configured
 

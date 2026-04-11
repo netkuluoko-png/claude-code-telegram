@@ -34,6 +34,7 @@ from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
+from .utils.file_extractor import FileAttachment, validate_file_path
 from .utils.image_extractor import (
     ImageAttachment,
     should_send_as_photo,
@@ -115,6 +116,14 @@ _TOOL_ICONS: Dict[str, str] = {
 def _tool_icon(name: str) -> str:
     """Return emoji for a tool, with a default wrench."""
     return _TOOL_ICONS.get(name, "\U0001f527")
+
+
+# Available Claude models for /model command
+_AVAILABLE_MODELS: List[Dict[str, str]] = [
+    {"id": "claude-sonnet-4-6", "label": "Sonnet 4.6", "desc": "Fast & capable"},
+    {"id": "claude-opus-4-6", "label": "Opus 4.6", "desc": "Most intelligent"},
+    {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5", "desc": "Fastest & cheapest"},
+]
 
 
 @dataclass
@@ -328,6 +337,7 @@ class MessageOrchestrator:
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
             ("resume", self.agentic_resume),
+            ("model", self.agentic_model),
             ("process", self.process_dispatch),
             ("restart", command.restart_command),
         ]
@@ -403,6 +413,14 @@ class MessageOrchestrator:
             CallbackQueryHandler(
                 self._inject_deps(self._handle_resume_callback),
                 pattern=r"^resume:",
+            )
+        )
+
+        # Model selection callbacks
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_model_callback),
+                pattern=r"^model:",
             )
         )
 
@@ -493,6 +511,7 @@ class MessageOrchestrator:
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("resume", "Browse & resume previous sessions"),
+                BotCommand("model", "Select Claude AI model"),
                 BotCommand("process", "Manage processes: run/ps/kill/logs"),
                 BotCommand("restart", "Restart the bot"),
             ]
@@ -656,6 +675,88 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
+    def _get_preferred_model(self, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+        """Get user's preferred model from user_data or fall back to config."""
+        return context.user_data.get("preferred_model") or None
+
+    async def agentic_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show model selector: /model."""
+        current = (
+            context.user_data.get("preferred_model")
+            or self.settings.claude_model
+            or "default"
+        )
+
+        keyboard = []
+        for m in _AVAILABLE_MODELS:
+            check = " \u2705" if m["id"] == current else ""
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"{m['label']} — {m['desc']}{check}",
+                        callback_data=f"model:{m['id']}",
+                    )
+                ]
+            )
+
+        current_label = current
+        for m in _AVAILABLE_MODELS:
+            if m["id"] == current:
+                current_label = m["label"]
+                break
+
+        await update.message.reply_text(
+            f"Current model: <b>{escape_html(current_label)}</b>\n\n"
+            "Select a model for all future sessions:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    async def _handle_model_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle model selection from inline keyboard."""
+        query = update.callback_query
+        model_id = query.data.split(":", 1)[1]
+
+        # Validate model_id against known models
+        valid_ids = {m["id"] for m in _AVAILABLE_MODELS}
+        if model_id not in valid_ids:
+            await query.answer("Unknown model", show_alert=True)
+            return
+
+        context.user_data["preferred_model"] = model_id
+        await query.answer()
+
+        # Find label for the selected model
+        label = model_id
+        for m in _AVAILABLE_MODELS:
+            if m["id"] == model_id:
+                label = m["label"]
+                break
+
+        # Rebuild keyboard with updated checkmark
+        keyboard = []
+        for m in _AVAILABLE_MODELS:
+            check = " \u2705" if m["id"] == model_id else ""
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"{m['label']} — {m['desc']}{check}",
+                        callback_data=f"model:{m['id']}",
+                    )
+                ]
+            )
+
+        await query.edit_message_text(
+            f"Model set to <b>{escape_html(label)}</b>\n\n"
+            "All new requests will use this model.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
     def _format_verbose_progress(
         self,
         activity_log: List[Dict[str, Any]],
@@ -755,6 +856,7 @@ class MessageOrchestrator:
         start_time: float,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
         mcp_images: Optional[List[ImageAttachment]] = None,
+        mcp_files: Optional[List[FileAttachment]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
@@ -765,15 +867,21 @@ class MessageOrchestrator:
         ``send_image_to_user`` tool calls and collects validated
         :class:`ImageAttachment` objects for later Telegram delivery.
 
+        When *mcp_files* is provided, the callback also intercepts
+        ``send_file_to_user`` tool calls and collects validated
+        :class:`FileAttachment` objects for later Telegram delivery.
+
         When *draft_streamer* is provided, tool activity and assistant
         text are streamed to the user in real time via
         ``sendMessageDraft``.
 
-        Returns None when verbose_level is 0 **and** no MCP image
+        Returns None when verbose_level is 0 **and** no MCP image/file
         collection or draft streaming is requested.
         Typing indicators are handled by a separate heartbeat task.
         """
-        need_mcp_intercept = mcp_images is not None and approved_directory is not None
+        need_mcp_intercept = (
+            mcp_images is not None or mcp_files is not None
+        ) and approved_directory is not None
 
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
@@ -785,14 +893,15 @@ class MessageOrchestrator:
             if interrupt_event is not None and interrupt_event.is_set():
                 return
 
-            # Intercept send_image_to_user MCP tool calls.
+            # Intercept send_image_to_user and send_file_to_user MCP tool calls.
             # The SDK namespaces MCP tools as "mcp__<server>__<tool>",
             # so match both the bare name and the namespaced variant.
             if update_obj.tool_calls and need_mcp_intercept:
                 for tc in update_obj.tool_calls:
                     tc_name = tc.get("name", "")
-                    if tc_name == "send_image_to_user" or tc_name.endswith(
-                        "__send_image_to_user"
+                    if mcp_images is not None and (
+                        tc_name == "send_image_to_user"
+                        or tc_name.endswith("__send_image_to_user")
                     ):
                         tc_input = tc.get("input", {})
                         file_path = tc_input.get("file_path", "")
@@ -802,6 +911,18 @@ class MessageOrchestrator:
                         )
                         if img:
                             mcp_images.append(img)
+                    if mcp_files is not None and (
+                        tc_name == "send_file_to_user"
+                        or tc_name.endswith("__send_file_to_user")
+                    ):
+                        tc_input = tc.get("input", {})
+                        file_path = tc_input.get("file_path", "")
+                        caption = tc_input.get("caption", "")
+                        attachment = validate_file_path(
+                            file_path, approved_directory, caption
+                        )
+                        if attachment:
+                            mcp_files.append(attachment)
 
             # Capture tool calls
             if update_obj.tool_calls:
@@ -946,6 +1067,30 @@ class MessageOrchestrator:
 
         return caption_sent
 
+    async def _send_files(
+        self,
+        update: Update,
+        files: List[FileAttachment],
+        reply_to_message_id: Optional[int] = None,
+    ) -> None:
+        """Send collected file attachments as Telegram documents."""
+        for attachment in files:
+            try:
+                with open(attachment.path, "rb") as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=attachment.path.name,
+                        caption=attachment.caption or None,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.warning(
+                    "Failed to send file",
+                    path=str(attachment.path),
+                    error=str(e),
+                )
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1011,6 +1156,7 @@ class MessageOrchestrator:
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
         mcp_images: List[ImageAttachment] = []
+        mcp_files: List[FileAttachment] = []
 
         # Stream drafts (private chats only)
         draft_streamer: Optional[DraftStreamer] = None
@@ -1030,6 +1176,7 @@ class MessageOrchestrator:
             start_time,
             reply_markup=stop_kb,
             mcp_images=mcp_images,
+            mcp_files=mcp_files,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
@@ -1048,6 +1195,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 interrupt_event=interrupt_event,
+                model_override=self._get_preferred_model(context),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1183,6 +1331,17 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
+        # Send MCP-collected files (from send_file_to_user tool calls)
+        if mcp_files:
+            try:
+                await self._send_files(
+                    update,
+                    mcp_files,
+                    reply_to_message_id=update.message.message_id,
+                )
+            except Exception as file_err:
+                logger.warning("File send failed", error=str(file_err))
+
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
         if audit_logger:
@@ -1298,6 +1457,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                model_override=self._get_preferred_model(context),
             )
 
             if force_new:
@@ -1508,6 +1668,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 images=images,
+                model_override=self._get_preferred_model(context),
             )
         finally:
             heartbeat.cancel()

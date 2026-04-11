@@ -1,16 +1,17 @@
 """MCP server exposing Telegram-specific tools to Claude.
 
-Runs as a stdio transport server. The ``send_image_to_user`` tool validates
-file existence and extension, then returns a success string. Actual Telegram
-delivery is handled by the bot's stream callback which intercepts the tool
-call.
+Runs as a stdio transport server. Tools validate file existence and return
+a success string. Actual Telegram delivery is handled by the bot's stream
+callback which intercepts the tool calls.
 """
 
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB — Telegram Bot API limit
 
 mcp = FastMCP("telegram")
 
@@ -41,6 +42,36 @@ async def send_image_to_user(file_path: str, caption: str = "") -> str:
         return f"Error: file not found: {file_path}"
 
     return f"Image queued for delivery: {path.name}"
+
+
+@mcp.tool()
+async def send_file_to_user(file_path: str, caption: str = "") -> str:
+    """Send any file to the Telegram user as a document.
+
+    Use this tool when the user asks you to send, share, or deliver a file.
+    The file will be sent as a Telegram document attachment.
+
+    Args:
+        file_path: Absolute path to the file on the server.
+        caption: Optional caption to display with the file.
+
+    Returns:
+        Confirmation string when the file is queued for delivery.
+    """
+    path = Path(file_path)
+
+    if not path.is_absolute():
+        return f"Error: path must be absolute, got '{file_path}'"
+
+    if not path.is_file():
+        return f"Error: file not found: {file_path}"
+
+    file_size = path.stat().st_size
+    if file_size > MAX_FILE_SIZE_BYTES:
+        size_mb = file_size / (1024 * 1024)
+        return f"Error: file too large ({size_mb:.1f} MB). Telegram limit: 50 MB."
+
+    return f"File queued for delivery: {path.name} ({file_size} bytes)"
 
 
 if __name__ == "__main__":
