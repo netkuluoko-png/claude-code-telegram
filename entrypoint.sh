@@ -14,11 +14,16 @@ fi
 mkdir -p /app/data /app/data/proc_logs
 chown -R claude:claude /app/data
 
-# Create .mcp.json ONLY if it doesn't exist yet (don't overwrite user changes)
+# Configure MCP servers via .claude/settings.json (project-level)
+# Claude CLI reads this when setting_sources=["project"]
 for dir in /project /project/*/; do
-    if [ -d "$dir" ] && [ ! -f "$dir/.mcp.json" ]; then
-        cat > "$dir/.mcp.json" << 'MCPEOF'
+    if [ -d "$dir" ]; then
+        mkdir -p "$dir/.claude"
+        cat > "$dir/.claude/settings.json" << 'MCPEOF'
 {
+  "permissions": {
+    "allow": ["mcp__process-manager__*"]
+  },
   "mcpServers": {
     "process-manager": {
       "command": "python",
@@ -32,6 +37,24 @@ MCPEOF
 done
 
 chown -R claude:claude /project
+
+# Also set user-level MCP config for claude user as fallback
+mkdir -p /home/claude/.claude
+cat > /home/claude/.claude/settings.json << 'MCPEOF'
+{
+  "permissions": {
+    "allow": ["mcp__process-manager__*"]
+  },
+  "mcpServers": {
+    "process-manager": {
+      "command": "python",
+      "args": ["-m", "src.process.mcp_server"],
+      "cwd": "/app"
+    }
+  }
+}
+MCPEOF
+chown -R claude:claude /home/claude/.claude
 
 # Enable process manager MCP by default (Railway/Docker env vars take precedence)
 export ENABLE_MCP="${ENABLE_MCP:-true}"
