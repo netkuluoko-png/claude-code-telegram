@@ -2,28 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Process Manager (IMPORTANT)
+## Process Manager
 
-Background processes persist across Claude sessions. Use these commands to start servers, bots, or any long-running tasks:
+Background processes persist across Claude sessions. Use MCP tools to manage them:
 
-```bash
-# Start a process
-cd /app && python -m src.process.cli run --name "my-server" --cwd /project/MyApp "python main.py"
+- `process_run(command, cwd, name)` — start a background process
+- `process_ps()` — list all managed processes
+- `process_logs(process_id, lines)` — view process output
+- `process_kill(process_id)` — stop a process
+- `process_cleanup()` — remove dead processes
 
-# List all processes
-cd /app && python -m src.process.cli ps
-
-# View process logs
-cd /app && python -m src.process.cli logs 1
-
-# Kill a process
-cd /app && python -m src.process.cli kill 1
-
-# Clean up dead processes
-cd /app && python -m src.process.cli cleanup
-```
-
-Always use the process manager instead of running servers directly — direct processes die when the session ends. Process manager keeps them alive.
+Always use the process manager instead of running servers directly — direct processes die when the session ends.
 
 ## Project Overview
 

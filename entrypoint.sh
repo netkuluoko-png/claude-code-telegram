@@ -33,5 +33,9 @@ done
 
 chown -R claude:claude /project
 
+# Enable process manager MCP by default (Railway/Docker env vars take precedence)
+export ENABLE_MCP="${ENABLE_MCP:-true}"
+export MCP_CONFIG_PATH="${MCP_CONFIG_PATH:-/app/mcp-process.json}"
+
 # Run as claude user
 exec su claude -c "python -c 'from src.main import run; run()'"

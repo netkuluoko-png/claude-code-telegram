@@ -338,12 +338,27 @@ class ClaudeSDKManager:
                 stderr=_stderr_callback,
             )
 
-            # Pass MCP server configuration if enabled
+            # Merge MCP server configurations:
+            # 1. Auto-discover built-in process-manager from mcp-process.json
+            # 2. Merge with user-configured MCP servers (ENABLE_MCP + MCP_CONFIG_PATH)
+            mcp_servers: Dict[str, Any] = {}
+
+            app_root = Path(__file__).resolve().parent.parent.parent
+            process_mcp_path = app_root / "mcp-process.json"
+            if process_mcp_path.exists():
+                auto_mcp = self._load_mcp_config(process_mcp_path)
+                if "process-manager" in auto_mcp:
+                    auto_mcp["process-manager"]["cwd"] = str(app_root)
+                mcp_servers.update(auto_mcp)
+
             if self.config.enable_mcp and self.config.mcp_config_path:
-                options.mcp_servers = self._load_mcp_config(self.config.mcp_config_path)
+                mcp_servers.update(self._load_mcp_config(self.config.mcp_config_path))
+
+            if mcp_servers:
+                options.mcp_servers = mcp_servers
                 logger.info(
                     "MCP servers configured",
-                    mcp_config_path=str(self.config.mcp_config_path),
+                    servers=list(mcp_servers.keys()),
                 )
 
             # Wire can_use_tool callback for preventive tool validation
