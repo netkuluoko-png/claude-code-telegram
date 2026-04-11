@@ -2,6 +2,29 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Process Manager (IMPORTANT)
+
+Background processes persist across Claude sessions. Use these commands to start servers, bots, or any long-running tasks:
+
+```bash
+# Start a process
+cd /app && python -m src.process.cli run --name "my-server" --cwd /project/MyApp "python main.py"
+
+# List all processes
+cd /app && python -m src.process.cli ps
+
+# View process logs
+cd /app && python -m src.process.cli logs 1
+
+# Kill a process
+cd /app && python -m src.process.cli kill 1
+
+# Clean up dead processes
+cd /app && python -m src.process.cli cleanup
+```
+
+Always use the process manager instead of running servers directly — direct processes die when the session ends. Process manager keeps them alive.
+
 ## Project Overview
 
 Telegram bot providing remote access to Claude Code. Python 3.10+, built with Poetry, using `python-telegram-bot` for Telegram and `claude-agent-sdk` for Claude Code integration.
