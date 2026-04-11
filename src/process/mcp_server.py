@@ -83,4 +83,4 @@ def process_cleanup() -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="stdio")
