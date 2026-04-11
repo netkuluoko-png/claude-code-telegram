@@ -14,17 +14,20 @@ fi
 mkdir -p /app/data /app/data/proc_logs
 chown -R claude:claude /app/data
 
-# Create MCP config for Claude Code in every project directory
-# so Claude Code sees process-manager tools in any session
-MCP_JSON='{"mcpServers":{"process-manager":{"command":"python","args":["-m","src.process.mcp_server"],"cwd":"/app"}}}'
-
-# Global: in approved directory
-echo "$MCP_JSON" > /project/.mcp.json
-
-# Also in each subdirectory
-for dir in /project/*/; do
-    if [ -d "$dir" ]; then
-        echo "$MCP_JSON" > "$dir/.mcp.json"
+# Create .mcp.json ONLY if it doesn't exist yet (don't overwrite user changes)
+for dir in /project /project/*/; do
+    if [ -d "$dir" ] && [ ! -f "$dir/.mcp.json" ]; then
+        cat > "$dir/.mcp.json" << 'MCPEOF'
+{
+  "mcpServers": {
+    "process-manager": {
+      "command": "python",
+      "args": ["-m", "src.process.mcp_server"],
+      "cwd": "/app"
+    }
+  }
+}
+MCPEOF
     fi
 done
 
