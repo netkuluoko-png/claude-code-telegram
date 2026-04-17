@@ -29,9 +29,11 @@ The `mcp-scheduler` MCP server lets the agent schedule future invocations of its
 
 - `schedule_task(task_name, prompt, schedule_type, ...)` — pick exactly one of: `schedule_type="once"` + `run_at` (ISO 8601 UTC), `schedule_type="interval"` + `interval_minutes`, or `schedule_type="cron"` + `cron_expression`. Optional: `max_runs`, `working_directory`, `target_chat_id`.
 - `list_tasks(status_filter=None)` — lists scheduled/active/completed/cancelled/failed tasks with id, schedule summary and next fire time.
+- `update_task(task_id, …)` — edit any field. Changing schedule-shape fields recomputes `next_run_at`. `max_runs=0` clears the cap, `target_chat_id=0` clears the override, `reactivate=True` revives a non-active task.
 - `delete_task(task_id)` — cancel a scheduled task.
+- `list_repos()` — enumerate valid `working_directory` paths (same set as `/repo`).
 
-All times are UTC. The `prompt` must be fully self-contained — the agent that later fires the task has no memory of the conversation that created it.
+All times are UTC; the current UTC + Europe/Kyiv time is injected into every system prompt. `working_directory` must be the APPROVED_DIRECTORY base or one of its immediate subdirectories (same list as `/repo`). The `prompt` must be fully self-contained — the agent that later fires the task has no memory of the conversation that created it.
 
 ## Project Overview
 

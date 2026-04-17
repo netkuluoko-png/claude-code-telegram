@@ -15,7 +15,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import aiosqlite
 
@@ -174,6 +174,56 @@ class SchedulerTaskStore:
             )
             await conn.commit()
             return (cursor.rowcount or 0) > 0
+
+    async def update_fields(
+        self,
+        task_id: int,
+        *,
+        fields: Dict[str, Any],
+    ) -> Optional[TaskRecord]:
+        """Apply a partial update to a task row.
+
+        ``fields`` maps column names to new values. Unknown columns are
+        rejected loudly (caller bug). Returns the updated record, or
+        ``None`` if the task does not exist.
+        """
+        allowed_columns = {
+            "task_name",
+            "prompt",
+            "schedule_type",
+            "run_at",
+            "interval_minutes",
+            "cron_expression",
+            "max_runs",
+            "next_run_at",
+            "status",
+            "working_directory",
+            "target_chat_id",
+        }
+        bad = set(fields.keys()) - allowed_columns
+        if bad:
+            raise ValueError(f"cannot update unknown columns: {sorted(bad)}")
+
+        if not fields:
+            return await self.get(task_id)
+
+        now = datetime.now(UTC)
+        assignments = ", ".join(f"{col} = ?" for col in fields)
+        values = list(fields.values()) + [now, task_id]
+
+        async with self._connect() as conn:
+            cursor = await conn.execute(
+                f"""
+                UPDATE scheduler_tasks
+                SET {assignments}, updated_at = ?
+                WHERE task_id = ?
+                """,
+                values,
+            )
+            await conn.commit()
+            if cursor.rowcount == 0:
+                return None
+            return await self._get_by_id(conn, task_id)
 
     async def claim_due(self, *, now: datetime) -> List[TaskRecord]:
         """Atomically fetch tasks whose next_run_at is in the past.

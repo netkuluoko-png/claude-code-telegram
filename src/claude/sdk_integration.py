@@ -50,6 +50,36 @@ TASK_COMPLETED_MSG = "✅ Task completed. Tools used: {tools_summary}"
 _USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "Europe/Kyiv")
 
 
+def _allowed_repos_prompt_fragment(approved_directory: Path) -> str:
+    """List APPROVED_DIRECTORY + immediate subdirs for the agent.
+
+    Mirrors the Telegram ``/repo`` command output so the agent always
+    sees the exact same set of choices the user does. Used to inform
+    mcp-scheduler's ``working_directory`` choice (among other things).
+    """
+    base = approved_directory.resolve()
+    lines = [f"base: {base}"]
+    try:
+        for d in sorted(base.iterdir(), key=lambda p: p.name):
+            if d.is_dir() and not d.name.startswith("."):
+                is_git = (d / ".git").is_dir()
+                marker = " (git)" if is_git else ""
+                lines.append(f"- {d.name} -> {d.resolve()}{marker}")
+    except (OSError, FileNotFoundError):
+        pass
+    if len(lines) == 1:
+        lines.append("(no subdirectories yet)")
+    body = "\n".join(lines)
+    return (
+        "<available-repos>\n"
+        "Working directories allowed for scheduled tasks (same set as the "
+        "Telegram /repo command). Pass one of the absolute paths below as "
+        "`working_directory` to mcp-scheduler.schedule_task / update_task.\n"
+        f"{body}\n"
+        "</available-repos>"
+    )
+
+
 def _current_time_prompt_fragment() -> str:
     """Build a fresh 'current time' snippet for the system prompt.
 
@@ -335,6 +365,9 @@ class ClaudeSDKManager:
                 "Use relative paths."
             )
             base_prompt += "\n\n" + _current_time_prompt_fragment()
+            base_prompt += "\n\n" + _allowed_repos_prompt_fragment(
+                self.config.approved_directory
+            )
             claude_md_path = Path(working_directory) / "CLAUDE.md"
             if claude_md_path.exists():
                 base_prompt += "\n\n" + claude_md_path.read_text(encoding="utf-8")

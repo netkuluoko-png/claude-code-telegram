@@ -97,9 +97,11 @@ class ScheduleTaskInput(BaseModel):
         default=None,
         description=(
             "Absolute path the agent should run in when the task fires. "
-            "Defaults to the bot's APPROVED_DIRECTORY if omitted. Pick the "
-            "same directory you are currently working in if the task "
-            "operates on this project."
+            "Must be the APPROVED_DIRECTORY base itself or one of its "
+            "immediate subdirectories — the same set of repos visible "
+            "via the Telegram /repo command. Call list_repos to discover "
+            "valid choices. Defaults to APPROVED_DIRECTORY (base) when "
+            "omitted."
         ),
     )
     target_chat_id: Optional[int] = Field(
@@ -157,3 +159,110 @@ class DeleteTaskInput(BaseModel):
             "schedule_task or list_tasks."
         ),
     )
+
+
+class UpdateTaskInput(BaseModel):
+    """Parameters for ``update_task``.
+
+    Only the fields you pass are changed; everything else stays as it
+    was. If you touch any schedule-shape field (``schedule_type``,
+    ``run_at``, ``interval_minutes``, ``cron_expression``) the next-run
+    time is recomputed.
+
+    When changing ``schedule_type`` you must also supply the matching
+    field for the new type (same rule as ``schedule_task``).
+    """
+
+    task_id: int = Field(
+        ...,
+        ge=1,
+        description="Numeric id of the task to edit (see list_tasks).",
+    )
+    task_name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="New human-readable name. Omit to keep current.",
+    )
+    prompt: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Replacement prompt delivered to the agent when the task "
+            "fires. Remember it must be fully self-contained. Omit to "
+            "keep the current prompt."
+        ),
+    )
+    schedule_type: Optional[ScheduleTypeLiteral] = Field(
+        default=None,
+        description=(
+            "Switch schedule mode. When set, supply the matching "
+            "field (run_at / interval_minutes / cron_expression)."
+        ),
+    )
+    run_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "New ISO 8601 UTC timestamp. Used when schedule_type='once' "
+            "(either already or being switched to). Must be in the future."
+        ),
+    )
+    interval_minutes: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="New interval in minutes. Used when schedule_type='interval'.",
+    )
+    cron_expression: Optional[str] = Field(
+        default=None,
+        description="New cron expression (UTC). Used when schedule_type='cron'.",
+    )
+    max_runs: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "New firing cap. Pass 0 to clear the cap (unlimited). Omit "
+            "to keep current."
+        ),
+    )
+    working_directory: Optional[str] = Field(
+        default=None,
+        description=(
+            "New working directory. Must be the APPROVED_DIRECTORY base "
+            "itself or one of its immediate subdirectories — the same "
+            "set visible via the Telegram /repo command. Omit to keep "
+            "current."
+        ),
+    )
+    target_chat_id: Optional[int] = Field(
+        default=None,
+        description=(
+            "New Telegram chat id for delivering the agent's reply. "
+            "Pass 0 to clear (fall back to NOTIFICATION_CHAT_IDS). Omit "
+            "to keep current."
+        ),
+    )
+    reactivate: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If True, revive a cancelled/completed/failed task back to "
+            "'active' status. Ignored if the task is already active."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_schedule_fields(self) -> "UpdateTaskInput":
+        if self.schedule_type is None:
+            return self
+        if self.schedule_type == "once" and not self.run_at:
+            raise ValueError(
+                "run_at is required when changing schedule_type to 'once'"
+            )
+        if self.schedule_type == "interval" and self.interval_minutes is None:
+            raise ValueError(
+                "interval_minutes is required when changing schedule_type to 'interval'"
+            )
+        if self.schedule_type == "cron" and not self.cron_expression:
+            raise ValueError(
+                "cron_expression is required when changing schedule_type to 'cron'"
+            )
+        return self
