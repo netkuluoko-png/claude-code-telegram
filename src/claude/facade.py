@@ -94,6 +94,7 @@ class ClaudeIntegration:
                     interrupt_event=interrupt_event,
                     images=images,
                     model_override=model_override,
+                    user_id=user_id,
                 )
             except ClaudeTimeoutError:
                 # Timeout during a RESUME is a distinct failure mode from a
@@ -147,6 +148,7 @@ class ClaudeIntegration:
                         interrupt_event=interrupt_event,
                         images=images,
                         model_override=model_override,
+                        user_id=user_id,
                     )
                 else:
                     raise
@@ -193,6 +195,7 @@ class ClaudeIntegration:
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
         model_override: Optional[str] = None,
+        user_id: int = 0,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(
@@ -204,6 +207,7 @@ class ClaudeIntegration:
             interrupt_event=interrupt_event,
             model_override=model_override,
             images=images,
+            user_id=user_id,
         )
 
     async def _find_resumable_session(

@@ -102,6 +102,12 @@ class SchedulerTaskWorker:
         chat_ids: List[int]
         if record.target_chat_id is not None:
             chat_ids = [record.target_chat_id]
+        elif record.created_by:
+            # For private Telegram chats, chat_id == user_id, so falling
+            # back to the task's creator works when NOTIFICATION_CHAT_IDS
+            # is not configured. Group chats that want a different target
+            # must set target_chat_id explicitly.
+            chat_ids = [record.created_by]
         else:
             chat_ids = list(self.default_chat_ids)
 

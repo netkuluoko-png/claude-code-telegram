@@ -340,6 +340,7 @@ class ClaudeSDKManager:
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
         model_override: Optional[str] = None,
+        user_id: int = 0,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -424,6 +425,17 @@ class ClaudeSDKManager:
             mcp_servers: Dict[str, Any] = {}
             mcp_servers.update(project_mcp_servers)
             mcp_servers.update(bot_mcp_servers)
+
+            # Inject the active user's id into mcp-scheduler so it can default
+            # target_chat_id to the caller's private chat (chat_id == user_id
+            # for private Telegram chats). Without this, tasks scheduled by
+            # the agent arrive with target_chat_id=NULL and — if
+            # NOTIFICATION_CHAT_IDS is unset — the reply gets silently dropped.
+            if user_id and "mcp-scheduler" in mcp_servers:
+                sched_cfg = mcp_servers["mcp-scheduler"]
+                sched_env = sched_cfg.setdefault("env", {})
+                sched_env.setdefault("SCHEDULER_DEFAULT_USER_ID", str(user_id))
+                sched_env.setdefault("SCHEDULER_DEFAULT_CHAT_ID", str(user_id))
 
             if mcp_servers:
                 options.mcp_servers = mcp_servers

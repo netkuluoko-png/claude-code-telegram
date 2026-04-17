@@ -80,6 +80,15 @@ class NotificationService:
                 break
 
             chat_ids = self._resolve_chat_ids(event)
+            if not chat_ids:
+                logger.warning(
+                    "Dropping agent response: no delivery chat resolved. "
+                    "Set target_chat_id on the event or NOTIFICATION_CHAT_IDS.",
+                    event_id=event.id,
+                    originating_event=event.originating_event_id,
+                    text_length=len(event.text),
+                )
+                continue
             for chat_id in chat_ids:
                 await self._rate_limited_send(chat_id, event)
 

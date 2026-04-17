@@ -204,6 +204,19 @@ async def schedule_task(
 
     created_by = int(os.environ.get("SCHEDULER_DEFAULT_USER_ID", "0") or "0")
 
+    # Default the delivery target to the caller's private chat (chat_id ==
+    # user_id for Telegram private chats). The bot injects both env vars at
+    # MCP-spawn time; without them the worker falls back further to
+    # created_by / NOTIFICATION_CHAT_IDS.
+    effective_chat_id: Optional[int] = payload.target_chat_id
+    if effective_chat_id is None:
+        env_chat = os.environ.get("SCHEDULER_DEFAULT_CHAT_ID")
+        if env_chat:
+            try:
+                effective_chat_id = int(env_chat)
+            except ValueError:
+                effective_chat_id = None
+
     await _store.ensure_schema()
     record = await _store.create(
         task_name=payload.task_name,
@@ -215,7 +228,7 @@ async def schedule_task(
         max_runs=payload.max_runs,
         next_run_at=next_run,
         working_directory=work_dir,
-        target_chat_id=payload.target_chat_id,
+        target_chat_id=effective_chat_id,
         created_by=created_by,
     )
 
