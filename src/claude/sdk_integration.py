@@ -3,8 +3,10 @@
 import asyncio
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 from claude_agent_sdk import (
@@ -44,6 +46,36 @@ logger = structlog.get_logger()
 
 # Fallback message when Claude produces no text but did use tools.
 TASK_COMPLETED_MSG = "✅ Task completed. Tools used: {tools_summary}"
+
+_USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "Europe/Kyiv")
+
+
+def _current_time_prompt_fragment() -> str:
+    """Build a fresh 'current time' snippet for the system prompt.
+
+    Rebuilt on every Claude invocation so the agent always sees the
+    actual current time (useful for scheduling decisions via mcp-scheduler).
+    Reports both UTC and the user's local timezone (default Europe/Kyiv).
+    """
+    now_utc = datetime.now(UTC)
+    try:
+        local_tz = ZoneInfo(_USER_TIMEZONE)
+        now_local = now_utc.astimezone(local_tz)
+        local_line = (
+            f"Local time ({_USER_TIMEZONE}): "
+            f"{now_local.strftime('%Y-%m-%d %H:%M:%S %Z%z')}"
+        )
+    except ZoneInfoNotFoundError:
+        local_line = (
+            f"Local time: unavailable (timezone '{_USER_TIMEZONE}' not installed)"
+        )
+    return (
+        "<current-time>\n"
+        f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+        f"{local_line}\n"
+        f"UTC ISO 8601: {now_utc.isoformat()}\n"
+        "</current-time>"
+    )
 
 
 @dataclass
@@ -302,6 +334,7 @@ class ClaudeSDKManager:
                 f"All file operations must stay within {working_directory}. "
                 "Use relative paths."
             )
+            base_prompt += "\n\n" + _current_time_prompt_fragment()
             claude_md_path = Path(working_directory) / "CLAUDE.md"
             if claude_md_path.exists():
                 base_prompt += "\n\n" + claude_md_path.read_text(encoding="utf-8")

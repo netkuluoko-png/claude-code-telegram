@@ -310,6 +310,37 @@ class DatabaseManager:
                     ON project_threads(project_slug);
                 """,
             ),
+            (
+                5,
+                """
+                -- Agent task scheduler (used by mcp-scheduler MCP server)
+                CREATE TABLE IF NOT EXISTS scheduler_tasks (
+                    task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_name TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    schedule_type TEXT NOT NULL,
+                    run_at TIMESTAMP,
+                    interval_minutes INTEGER,
+                    cron_expression TEXT,
+                    max_runs INTEGER,
+                    runs_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    next_run_at TIMESTAMP NOT NULL,
+                    last_run_at TIMESTAMP,
+                    last_error TEXT,
+                    working_directory TEXT NOT NULL,
+                    target_chat_id INTEGER,
+                    created_by INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scheduler_tasks_due
+                    ON scheduler_tasks(status, next_run_at);
+                CREATE INDEX IF NOT EXISTS idx_scheduler_tasks_status
+                    ON scheduler_tasks(status);
+                """,
+            ),
         ]
 
     async def _init_pool(self):

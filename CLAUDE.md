@@ -23,6 +23,16 @@ Send files and images directly to the user's Telegram chat:
 
 Both tools validate the file and queue it for delivery — the actual Telegram message is sent automatically after your response.
 
+## Agent Task Scheduler
+
+The `mcp-scheduler` MCP server lets the agent schedule future invocations of itself. When a scheduled task fires, the bot calls `ClaudeIntegration.run_command()` with the stored prompt — the same entry point Telegram messages use — and the reply is delivered to the configured chat.
+
+- `schedule_task(task_name, prompt, schedule_type, ...)` — pick exactly one of: `schedule_type="once"` + `run_at` (ISO 8601 UTC), `schedule_type="interval"` + `interval_minutes`, or `schedule_type="cron"` + `cron_expression`. Optional: `max_runs`, `working_directory`, `target_chat_id`.
+- `list_tasks(status_filter=None)` — lists scheduled/active/completed/cancelled/failed tasks with id, schedule summary and next fire time.
+- `delete_task(task_id)` — cancel a scheduled task.
+
+All times are UTC. The `prompt` must be fully self-contained — the agent that later fires the task has no memory of the conversation that created it.
+
 ## Project Overview
 
 Telegram bot providing remote access to Claude Code. Python 3.10+, built with Poetry, using `python-telegram-bot` for Telegram and `claude-agent-sdk` for Claude Code integration.
@@ -99,6 +109,7 @@ context.bot_data["security_validator"]
 - `src/events/` -- EventBus (async pub/sub), event types, AgentHandler, EventSecurityMiddleware
 - `src/api/` -- FastAPI webhook server, GitHub HMAC-SHA256 + Bearer token auth
 - `src/scheduler/` -- APScheduler cron jobs, persistent storage in SQLite
+- `src/scheduler_mcp/` -- Agent-facing task scheduler (`mcp-scheduler` MCP server + in-process worker). Supports `once` / `interval` / `cron` schedules; worker fires tasks by publishing `ScheduledEvent` so the agent is invoked via the same `ClaudeIntegration.run_command()` path as Telegram messages.
 - `src/notifications/` -- NotificationService, rate-limited Telegram delivery
 
 ### Security Model

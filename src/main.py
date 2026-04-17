@@ -26,6 +26,7 @@ from src.exceptions import ConfigurationError
 from src.notifications.service import NotificationService
 from src.projects import ProjectThreadManager, load_project_registry
 from src.scheduler.scheduler import JobScheduler
+from src.scheduler_mcp import SchedulerTaskWorker
 from src.security.audit import AuditLogger, InMemoryAuditStorage
 from src.security.auth import (
     AuthenticationManager,
@@ -216,6 +217,7 @@ async def run_application(app: Dict[str, Any]) -> None:
 
     notification_service: Optional[NotificationService] = None
     scheduler: Optional[JobScheduler] = None
+    scheduler_task_worker: Optional[SchedulerTaskWorker] = None
     project_threads_manager: Optional[ProjectThreadManager] = None
 
     # Set up signal handlers for graceful shutdown
@@ -316,6 +318,18 @@ async def run_application(app: Dict[str, Any]) -> None:
             await scheduler.start()
             logger.info("Job scheduler enabled")
 
+        # Agent task worker — fires tasks written by the mcp-scheduler
+        # MCP server. Runs independently of the cron JobScheduler because
+        # it supports one-shot and interval schedules too.
+        scheduler_task_worker = SchedulerTaskWorker(
+            db_manager=storage.db_manager,
+            event_bus=event_bus,
+            default_working_directory=config.approved_directory,
+            default_chat_ids=config.notification_chat_ids or [],
+        )
+        await scheduler_task_worker.start()
+        logger.info("Scheduler task worker enabled")
+
         # Shutdown task
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         tasks.append(shutdown_task)
@@ -352,6 +366,8 @@ async def run_application(app: Dict[str, Any]) -> None:
         logger.info("Shutting down application")
 
         try:
+            if scheduler_task_worker:
+                await scheduler_task_worker.stop()
             if scheduler:
                 await scheduler.stop()
             if notification_service:

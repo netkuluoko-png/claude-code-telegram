@@ -15,6 +15,15 @@
       "env": {
         "PYTHONPATH": "/app"
       }
+    },
+    "mcp-scheduler": {
+      "command": "python",
+      "args": ["-m", "src.scheduler_mcp.mcp_server"],
+      "cwd": "/app",
+      "env": {
+        "PYTHONPATH": "/app",
+        "SCHEDULER_DB_PATH": "/app/data/bot.db"
+      }
     }
   }
 }

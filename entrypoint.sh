@@ -80,7 +80,7 @@ if settings_path.exists():
     except (json.JSONDecodeError, OSError):
         existing = {}
 
-mcp_perms = ['mcp__process-manager__*', 'mcp__telegram__*']
+mcp_perms = ['mcp__process-manager__*', 'mcp__telegram__*', 'mcp__mcp-scheduler__*']
 allow = existing.setdefault('permissions', {}).setdefault('allow', [])
 for p in mcp_perms:
     if p not in allow:
@@ -94,6 +94,11 @@ existing['mcpServers'] = {
     'telegram': {
         'command': 'python', 'args': ['-m', 'src.mcp.telegram_server'],
         'cwd': '/app', 'env': {'PYTHONPATH': '/app'}
+    },
+    'mcp-scheduler': {
+        'command': 'python', 'args': ['-m', 'src.scheduler_mcp.mcp_server'],
+        'cwd': '/app',
+        'env': {'PYTHONPATH': '/app', 'SCHEDULER_DB_PATH': '/app/data/bot.db'}
     }
 }
 settings_path.write_text(json.dumps(existing, indent=2))
@@ -116,7 +121,7 @@ if settings_path.exists():
     except (json.JSONDecodeError, OSError):
         existing = {}
 
-mcp_perms = ['mcp__process-manager__*', 'mcp__telegram__*']
+mcp_perms = ['mcp__process-manager__*', 'mcp__telegram__*', 'mcp__mcp-scheduler__*']
 allow = existing.setdefault('permissions', {}).setdefault('allow', [])
 for p in mcp_perms:
     if p not in allow:
@@ -130,6 +135,11 @@ existing['mcpServers'] = {
     'telegram': {
         'command': 'python', 'args': ['-m', 'src.mcp.telegram_server'],
         'cwd': '/app', 'env': {'PYTHONPATH': '/app'}
+    },
+    'mcp-scheduler': {
+        'command': 'python', 'args': ['-m', 'src.scheduler_mcp.mcp_server'],
+        'cwd': '/app',
+        'env': {'PYTHONPATH': '/app', 'SCHEDULER_DB_PATH': '/app/data/bot.db'}
     }
 }
 settings_path.write_text(json.dumps(existing, indent=2))
