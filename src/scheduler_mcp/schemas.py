@@ -12,19 +12,25 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-ScheduleTypeLiteral = Literal["once", "interval", "cron"]
+ScheduleTypeLiteral = Literal["once", "interval", "cron", "random_daily"]
 StatusFilterLiteral = Literal["active", "completed", "cancelled", "failed", "all"]
 
 
 class ScheduleTaskInput(BaseModel):
     """Parameters for ``schedule_task``.
 
-    The three schedule types are mutually exclusive — pick exactly one
-    and fill in the matching field:
+    Four schedule types are mutually exclusive — pick exactly one and
+    fill in the matching fields:
 
-    * ``once``     — fill ``run_at`` with an ISO 8601 timestamp.
-    * ``interval`` — fill ``interval_minutes`` with a positive integer.
-    * ``cron``     — fill ``cron_expression`` with a 5-field cron string.
+    * ``once``         — fill ``run_at`` with an ISO 8601 timestamp.
+    * ``interval``     — fill ``interval_minutes`` with a positive integer.
+    * ``cron``         — fill ``cron_expression`` with a 5-field cron
+                         string (UTC).
+    * ``random_daily`` — fire once per day at a uniformly random moment
+                         inside ``[window_start, window_end]`` in the
+                         given ``timezone``; optionally skip whole days
+                         with probability ``skip_probability``. Used to
+                         break up predictable patterns.
     """
 
     task_name: str = Field(
@@ -83,6 +89,43 @@ class ScheduleTaskInput(BaseModel):
             "schedule_type='cron', ignored otherwise."
         ),
     )
+    window_start: Optional[str] = Field(
+        default=None,
+        description=(
+            "Daily window start as 'HH:MM', 'HH:MM:SS' or "
+            "'HH:MM:SS.fff' in `timezone`. Example: '12:00'. REQUIRED "
+            "when schedule_type='random_daily', ignored otherwise."
+        ),
+    )
+    window_end: Optional[str] = Field(
+        default=None,
+        description=(
+            "Daily window end — same format as window_start. Must be "
+            "strictly greater than window_start. '24:00' is accepted as "
+            "end-of-day. REQUIRED when schedule_type='random_daily', "
+            "ignored otherwise."
+        ),
+    )
+    skip_probability: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "For schedule_type='random_daily': probability in [0, 1) of "
+            "silently skipping an entire day. 0.0 = fire every day, "
+            "0.2 ≈ skip ~1 day per 5 (~1-2 days per week), 0.5 = skip "
+            "half the days. Default 0.0. Used to break up predictable "
+            "patterns so heuristics don't flag the activity."
+        ),
+    )
+    timezone: Optional[str] = Field(
+        default=None,
+        description=(
+            "IANA timezone in which window_start / window_end are "
+            "interpreted (e.g. 'Europe/Kyiv', 'UTC'). Default "
+            "'Europe/Kyiv'. Ignored unless schedule_type='random_daily'."
+        ),
+    )
     max_runs: Optional[int] = Field(
         default=None,
         ge=1,
@@ -131,6 +174,12 @@ class ScheduleTaskInput(BaseModel):
             if not self.cron_expression:
                 raise ValueError(
                     "cron_expression is required when schedule_type='cron'"
+                )
+        elif self.schedule_type == "random_daily":
+            if not self.window_start or not self.window_end:
+                raise ValueError(
+                    "window_start and window_end are required when "
+                    "schedule_type='random_daily'"
                 )
         return self
 
@@ -216,6 +265,36 @@ class UpdateTaskInput(BaseModel):
         default=None,
         description="New cron expression (UTC). Used when schedule_type='cron'.",
     )
+    window_start: Optional[str] = Field(
+        default=None,
+        description=(
+            "New daily window start ('HH:MM[:SS[.fff]]'). Used when "
+            "schedule_type='random_daily'."
+        ),
+    )
+    window_end: Optional[str] = Field(
+        default=None,
+        description=(
+            "New daily window end ('HH:MM[:SS[.fff]]'). Used when "
+            "schedule_type='random_daily'."
+        ),
+    )
+    skip_probability: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "New daily-skip probability in [0, 1). Used when "
+            "schedule_type='random_daily'. Pass 0.0 to fire every day."
+        ),
+    )
+    timezone: Optional[str] = Field(
+        default=None,
+        description=(
+            "New IANA timezone for the random-daily window (e.g. "
+            "'Europe/Kyiv'). Pass an empty string to restore the default."
+        ),
+    )
     max_runs: Optional[int] = Field(
         default=None,
         ge=0,
@@ -264,5 +343,12 @@ class UpdateTaskInput(BaseModel):
         if self.schedule_type == "cron" and not self.cron_expression:
             raise ValueError(
                 "cron_expression is required when changing schedule_type to 'cron'"
+            )
+        if self.schedule_type == "random_daily" and (
+            not self.window_start or not self.window_end
+        ):
+            raise ValueError(
+                "window_start and window_end are required when changing "
+                "schedule_type to 'random_daily'"
             )
         return self

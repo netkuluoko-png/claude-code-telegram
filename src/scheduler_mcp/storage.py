@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS scheduler_tasks (
     target_chat_id INTEGER,
     created_by INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    window_start TEXT,
+    window_end TEXT,
+    skip_probability REAL DEFAULT 0.0,
+    timezone TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_scheduler_tasks_due
@@ -94,6 +98,10 @@ class SchedulerTaskStore:
         working_directory: str,
         target_chat_id: Optional[int],
         created_by: int,
+        window_start: Optional[str] = None,
+        window_end: Optional[str] = None,
+        skip_probability: float = 0.0,
+        timezone: Optional[str] = None,
     ) -> TaskRecord:
         now = datetime.now(UTC)
         async with self._connect() as conn:
@@ -104,8 +112,9 @@ class SchedulerTaskStore:
                     run_at, interval_minutes, cron_expression, max_runs,
                     runs_count, status, next_run_at,
                     working_directory, target_chat_id, created_by,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at,
+                    window_start, window_end, skip_probability, timezone
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_name,
@@ -121,6 +130,10 @@ class SchedulerTaskStore:
                     created_by,
                     now,
                     now,
+                    window_start,
+                    window_end,
+                    skip_probability,
+                    timezone,
                 ),
             )
             await conn.commit()
@@ -199,6 +212,10 @@ class SchedulerTaskStore:
             "status",
             "working_directory",
             "target_chat_id",
+            "window_start",
+            "window_end",
+            "skip_probability",
+            "timezone",
         }
         bad = set(fields.keys()) - allowed_columns
         if bad:

@@ -341,6 +341,20 @@ class DatabaseManager:
                     ON scheduler_tasks(status);
                 """,
             ),
+            (
+                6,
+                """
+                -- Extend scheduler_tasks for the 'random_daily' schedule type.
+                -- Once per day at a random time within [window_start, window_end]
+                -- in `timezone`, with probability `skip_probability` of
+                -- silently skipping an entire day (anti-fingerprinting).
+                ALTER TABLE scheduler_tasks ADD COLUMN window_start TEXT;
+                ALTER TABLE scheduler_tasks ADD COLUMN window_end TEXT;
+                ALTER TABLE scheduler_tasks
+                    ADD COLUMN skip_probability REAL DEFAULT 0.0;
+                ALTER TABLE scheduler_tasks ADD COLUMN timezone TEXT;
+                """,
+            ),
         ]
 
     async def _init_pool(self):

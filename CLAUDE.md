@@ -27,7 +27,7 @@ Both tools validate the file and queue it for delivery — the actual Telegram m
 
 The `mcp-scheduler` MCP server lets the agent schedule future invocations of itself. When a scheduled task fires, the bot calls `ClaudeIntegration.run_command()` with the stored prompt — the same entry point Telegram messages use — and the reply is delivered to the configured chat.
 
-- `schedule_task(task_name, prompt, schedule_type, ...)` — pick exactly one of: `schedule_type="once"` + `run_at` (ISO 8601 UTC), `schedule_type="interval"` + `interval_minutes`, or `schedule_type="cron"` + `cron_expression`. Optional: `max_runs`, `working_directory`, `target_chat_id`.
+- `schedule_task(task_name, prompt, schedule_type, ...)` — pick exactly one of: `schedule_type="once"` + `run_at` (ISO 8601 UTC), `schedule_type="interval"` + `interval_minutes`, `schedule_type="cron"` + `cron_expression`, or `schedule_type="random_daily"` + `window_start`/`window_end` (`HH:MM[:SS[.fff]]` in `timezone`, default `Europe/Kyiv`) with optional `skip_probability` (0..1 chance to skip a whole day). Optional for all: `max_runs`, `working_directory`, `target_chat_id`.
 - `list_tasks(status_filter=None)` — lists scheduled/active/completed/cancelled/failed tasks with id, schedule summary and next fire time.
 - `update_task(task_id, …)` — edit any field. Changing schedule-shape fields recomputes `next_run_at`. `max_runs=0` clears the cap, `target_chat_id=0` clears the override, `reactivate=True` revives a non-active task.
 - `delete_task(task_id)` — cancel a scheduled task.

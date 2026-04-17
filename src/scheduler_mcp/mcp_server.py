@@ -113,6 +113,17 @@ def _describe_schedule(record: TaskRecord) -> str:
         return f"every {record.interval_minutes} min"
     if record.schedule_type == "cron":
         return f"cron '{record.cron_expression}'"
+    if record.schedule_type == "random_daily":
+        skip = (
+            f" skip={record.skip_probability:.2f}"
+            if record.skip_probability
+            else ""
+        )
+        tz = record.timezone or "Europe/Kyiv"
+        return (
+            f"random_daily [{record.window_start}-{record.window_end} {tz}]"
+            f"{skip}"
+        )
     return record.schedule_type
 
 
@@ -144,6 +155,10 @@ async def schedule_task(
     run_at: Optional[str] = None,
     interval_minutes: Optional[int] = None,
     cron_expression: Optional[str] = None,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    skip_probability: Optional[float] = None,
+    timezone: Optional[str] = None,
     max_runs: Optional[int] = None,
     working_directory: Optional[str] = None,
     target_chat_id: Optional[int] = None,
@@ -158,15 +173,25 @@ async def schedule_task(
 
     Pick exactly one schedule mode:
 
-    - schedule_type="once"     + run_at="2026-04-18T09:30:00Z"
-    - schedule_type="interval" + interval_minutes=30
-    - schedule_type="cron"     + cron_expression="0 9 * * 1-5"
+    - schedule_type="once"         + run_at="2026-04-18T09:30:00Z"
+    - schedule_type="interval"     + interval_minutes=30
+    - schedule_type="cron"         + cron_expression="0 9 * * 1-5"
+    - schedule_type="random_daily" + window_start="12:00"
+                                   + window_end="24:00"
+                                   + timezone="Europe/Kyiv"  (optional, default)
+                                   + skip_probability=0.2    (optional)
 
-    All times are UTC. `working_directory` must be one of the repos
-    visible via the Telegram /repo command (the APPROVED_DIRECTORY base
-    or one of its immediate subdirectories) — call list_repos to see
-    the current set. `prompt` must be completely self-contained — the
-    agent will have no memory of this conversation when the task fires.
+    `run_at` / `cron_expression` are UTC. `window_start` / `window_end`
+    for random_daily are in `timezone` (default 'Europe/Kyiv') and
+    accept 'HH:MM', 'HH:MM:SS' or 'HH:MM:SS.fff'. `skip_probability`
+    (0..1) randomly drops whole days — use it to imitate organic human
+    cadence instead of a rigid schedule.
+
+    `working_directory` must be one of the repos visible via the
+    Telegram /repo command (the APPROVED_DIRECTORY base or one of its
+    immediate subdirectories) — call list_repos to see the current
+    set. `prompt` must be completely self-contained — the agent will
+    have no memory of this conversation when the task fires.
     """
     try:
         payload = ScheduleTaskInput(
@@ -176,6 +201,10 @@ async def schedule_task(
             run_at=run_at,
             interval_minutes=interval_minutes,
             cron_expression=cron_expression,
+            window_start=window_start,
+            window_end=window_end,
+            skip_probability=skip_probability,
+            timezone=timezone,
             max_runs=max_runs,
             working_directory=working_directory,
             target_chat_id=target_chat_id,
@@ -197,6 +226,10 @@ async def schedule_task(
             run_at=run_at_dt,
             interval_minutes=payload.interval_minutes,
             cron_expression=payload.cron_expression,
+            window_start=payload.window_start,
+            window_end=payload.window_end,
+            skip_probability=payload.skip_probability,
+            timezone=payload.timezone,
             now=now,
         )
     except ValueError as exc:
@@ -230,6 +263,10 @@ async def schedule_task(
         working_directory=work_dir,
         target_chat_id=effective_chat_id,
         created_by=created_by,
+        window_start=payload.window_start,
+        window_end=payload.window_end,
+        skip_probability=payload.skip_probability or 0.0,
+        timezone=payload.timezone,
     )
 
     return (
@@ -279,6 +316,10 @@ async def update_task(
     run_at: Optional[str] = None,
     interval_minutes: Optional[int] = None,
     cron_expression: Optional[str] = None,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    skip_probability: Optional[float] = None,
+    timezone: Optional[str] = None,
     max_runs: Optional[int] = None,
     working_directory: Optional[str] = None,
     target_chat_id: Optional[int] = None,
@@ -312,6 +353,10 @@ async def update_task(
             run_at=run_at,
             interval_minutes=interval_minutes,
             cron_expression=cron_expression,
+            window_start=window_start,
+            window_end=window_end,
+            skip_probability=skip_probability,
+            timezone=timezone,
             max_runs=max_runs,
             working_directory=working_directory,
             target_chat_id=target_chat_id,
@@ -341,9 +386,21 @@ async def update_task(
         or payload.run_at is not None
         or payload.interval_minutes is not None
         or payload.cron_expression is not None
+        or payload.window_start is not None
+        or payload.window_end is not None
+        or payload.skip_probability is not None
+        or payload.timezone is not None
     )
 
     if schedule_touched:
+        run_at_dt: Optional[datetime] = None
+        next_interval: Optional[int] = None
+        next_cron: Optional[str] = None
+        next_window_start: Optional[str] = None
+        next_window_end: Optional[str] = None
+        next_skip_probability: Optional[float] = None
+        next_timezone: Optional[str] = None
+
         if new_schedule_type == "once":
             run_at_dt = (
                 parse_iso_utc(payload.run_at)
@@ -352,10 +409,7 @@ async def update_task(
             )
             if run_at_dt is None:
                 return "Error: run_at is required for schedule_type='once'"
-            next_interval = None
-            next_cron = None
         elif new_schedule_type == "interval":
-            run_at_dt = None
             next_interval = (
                 payload.interval_minutes
                 if payload.interval_minutes is not None
@@ -366,16 +420,33 @@ async def update_task(
                     "Error: interval_minutes is required for "
                     "schedule_type='interval'"
                 )
-            next_cron = None
         elif new_schedule_type == "cron":
-            run_at_dt = None
-            next_interval = None
             next_cron = payload.cron_expression or existing.cron_expression
             if not next_cron:
                 return (
                     "Error: cron_expression is required for "
                     "schedule_type='cron'"
                 )
+        elif new_schedule_type == "random_daily":
+            next_window_start = (
+                payload.window_start or existing.window_start
+            )
+            next_window_end = payload.window_end or existing.window_end
+            if not next_window_start or not next_window_end:
+                return (
+                    "Error: window_start and window_end are required for "
+                    "schedule_type='random_daily'"
+                )
+            next_skip_probability = (
+                payload.skip_probability
+                if payload.skip_probability is not None
+                else existing.skip_probability
+            )
+            # timezone="" clears to default; None keeps current
+            if payload.timezone is not None:
+                next_timezone = payload.timezone or None
+            else:
+                next_timezone = existing.timezone
         else:
             return f"Error: unknown schedule_type '{new_schedule_type}'"
 
@@ -385,6 +456,10 @@ async def update_task(
                 run_at=run_at_dt,
                 interval_minutes=next_interval,
                 cron_expression=next_cron,
+                window_start=next_window_start,
+                window_end=next_window_end,
+                skip_probability=next_skip_probability,
+                timezone=next_timezone,
                 now=datetime.now(UTC),
             )
         except ValueError as exc:
@@ -394,6 +469,10 @@ async def update_task(
         updates["run_at"] = run_at_dt
         updates["interval_minutes"] = next_interval
         updates["cron_expression"] = next_cron
+        updates["window_start"] = next_window_start
+        updates["window_end"] = next_window_end
+        updates["skip_probability"] = next_skip_probability or 0.0
+        updates["timezone"] = next_timezone
         updates["next_run_at"] = next_run
 
     if payload.max_runs is not None:
@@ -424,6 +503,10 @@ async def update_task(
                     run_at=existing.run_at,
                     interval_minutes=existing.interval_minutes,
                     cron_expression=existing.cron_expression,
+                    window_start=existing.window_start,
+                    window_end=existing.window_end,
+                    skip_probability=existing.skip_probability,
+                    timezone=existing.timezone,
                     now=datetime.now(UTC),
                 )
                 updates["next_run_at"] = fresh_next
