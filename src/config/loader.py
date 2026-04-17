@@ -38,8 +38,11 @@ def load_config(
     else:
         logger.warning("No .env file found", path=str(env_file))
 
-    # Determine environment
-    env = env or os.getenv("ENVIRONMENT", "development")
+    # Determine environment.
+    # Railway auto-sets RAILWAY_ENVIRONMENT (usually "production"); honor it as a
+    # fallback when the user hasn't explicitly set ENVIRONMENT, so a stock Railway
+    # deploy doesn't silently run as "development".
+    env = env or os.getenv("ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT") or "development"
     logger.info("Loading configuration", environment=env)
 
     try:
@@ -90,13 +93,26 @@ def _apply_environment_overrides(settings: Settings, env: Optional[str]) -> Sett
     else:
         logger.warning("Unknown environment, using default settings", environment=env)
 
-    # Apply overrides
+    # Apply overrides — but only for fields the user did NOT explicitly set.
+    # Pydantic's model_fields_set tracks which fields came from the env/user
+    # (as opposed to class defaults). Without this guard, a preset like
+    # DevelopmentConfig.claude_timeout_seconds=600 would silently clobber a
+    # user-supplied CLAUDE_TIMEOUT_SECONDS=3600.
+    explicitly_set = set(settings.model_fields_set)
     for key, value in overrides.items():
-        if hasattr(settings, key):
-            setattr(settings, key, value)
+        if not hasattr(settings, key):
+            continue
+        if key in explicitly_set:
             logger.debug(
-                "Applied environment override", key=key, value=value, environment=env
+                "Skipping environment override (user-set)",
+                key=key,
+                environment=env,
             )
+            continue
+        setattr(settings, key, value)
+        logger.debug(
+            "Applied environment override", key=key, value=value, environment=env
+        )
 
     return settings
 

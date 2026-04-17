@@ -113,26 +113,28 @@ Webhook authentication: GitHub HMAC-SHA256 signature verification, generic Beare
 
 ### MCP Configuration
 
-MCP tools auto-register in every Claude session. How it works:
+MCP tools auto-register in every Claude session. The merge pipeline (implemented in `ClaudeSDKManager._build_mcp_servers` + `execute_command`):
 
-1. `ClaudeSDKManager.execute_command()` auto-discovers `mcp-process.json` from the project root (`Path(__file__).parent.parent.parent`)
-2. The `cwd` in the config is overridden at runtime to the actual project root (works both in Docker `/app` and locally)
-3. User-configured MCP servers (`ENABLE_MCP=true` + `MCP_CONFIG_PATH`) are merged on top
-4. The merged dict is passed to `options.mcp_servers` in `ClaudeAgentOptions`
+1. **Project-local** — `<cwd>/.mcp.json` and `<cwd>/.claude/settings.json` (`mcpServers` block). Entries with a missing `cwd`, a Windows drive-letter path, or a `Path(arg)` that doesn't exist on Linux are dropped via `_mcp_config_skip_reason` with a `Skipping invalid project MCP entry` warning.
+2. **Bot-owned** — `/app/mcp-process.json` auto-discovered from the image root. Keys declared here always win over project-local entries with the same name (so a project can't shadow `process-manager`/`telegram`).
+3. **User-configured** — `MCP_CONFIG_PATH` JSON merged on top when `ENABLE_MCP=true`.
 
-To add a new MCP server:
+The merged dict is passed to `ClaudeAgentOptions.mcp_servers` **and** `extra_args={"strict-mcp-config": None, "debug-to-stderr": None}` — `--strict-mcp-config` forces the CLI to use only our merged list and ignore any native `.mcp.json` discovery, which eliminates the "launched but not connected" approval-limbo state. `--debug-to-stderr` surfaces server spawn failures through our `_stderr_callback`.
 
-1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py` as example). **Import: `from fastmcp import FastMCP`** (NOT `from mcp.server.fastmcp` — that package is not installed). **Use `mcp.run(transport="stdio")`** — Claude CLI communicates via stdio, not HTTP
-2. Add it to `mcp-process.json` under `mcpServers`. **Must include `env.PYTHONPATH`** — the CLI ignores `cwd`, so without PYTHONPATH the module won't be importable:
+Per working directory the bot also:
+- Rewrites `.claude/settings.json` with the merged `mcpServers`, `mcp__<name>__*` permissions, `enabledMcpjsonServers`, and `enableAllProjectMcpServers: false` (`_ensure_mcp_settings`).
+- Stamps `~/.claude.json` → `projects.<cwd>` with `hasTrustDialogAccepted: true` (`_approve_project_mcps`).
+- Regenerates `.claude/rules/mcp-guide.md` (`_ensure_mcp_rules`).
+
+**Project MCP dependency auto-install** (`_ensure_mcp_deps`): for every project-local MCP whose `cwd` contains a `requirements.txt`, the bot runs `pip install --target /app/data/.mcp_deps/<name>-<sha256-12>` once per requirements-hash, then prepends the target to the subprocess's `PYTHONPATH`. The cache lives on the `/app/data` volume, so installs survive deploys. Same algorithm fires before `/mcp` inspection.
+
+#### Adding a new **bot-owned** MCP server
+
+1. Create a FastMCP server in `src/mcp/` (see `src/process/mcp_server.py`). **Import: `from fastmcp import FastMCP`** (NOT `from mcp.server.fastmcp` — that package is not installed). **Use `mcp.run(transport="stdio")`** — the CLI speaks stdio, not HTTP.
+2. Register it in `mcp-process.json` under `mcpServers`. **Must include `env.PYTHONPATH=/app`** — the CLI ignores `cwd` for module resolution:
    ```json
    {
      "mcpServers": {
-       "process-manager": {
-         "command": "python",
-         "args": ["-m", "src.process.mcp_server"],
-         "cwd": "/app",
-         "env": { "PYTHONPATH": "/app" }
-       },
        "my-server": {
          "command": "python",
          "args": ["-m", "src.mcp.my_server"],
@@ -142,10 +144,28 @@ To add a new MCP server:
      }
    }
    ```
-3. Also update `entrypoint.sh` — it writes `.claude/settings.json` with the same MCP config to project and user directories
-4. Deploy — all new sessions will see the tools automatically
+3. Mirror the same entry in `entrypoint.sh` (both `/project/*/` and `/home/claude/.claude/settings.json` blocks) so existing project folders on the persistent volume pick up the new server on restart.
+4. Deploy — new sessions see the tools automatically.
 
-**Do NOT** edit CLAUDE.md with CLI fallback commands as a workaround. If MCP tools are missing, fix the configuration in `sdk_integration.py` or `mcp-process.json`.
+#### Adding a **project-local** MCP server (no bot code change)
+
+1. Put `server.py` anywhere in the project folder. Use `from fastmcp import FastMCP` + `mcp.run(transport="stdio")`.
+2. Create `.mcp.json` at the project root:
+   ```json
+   {
+     "mcpServers": {
+       "my-proj-mcp": {
+         "command": "python",
+         "args": ["server.py"],
+         "cwd": "/app/data/project/<project-name>/<server-dir>"
+       }
+     }
+   }
+   ```
+3. Drop a `requirements.txt` next to `server.py` listing every third-party import. The bot auto-installs it on the next `/mcp` inspection or Claude session.
+4. Use Linux paths only — Windows drive letters are filtered out.
+
+**Do NOT** edit `CLAUDE.md` with bash fallback commands as a workaround. If MCP tools are missing, fix `mcp-process.json` (bot-owned) or the project's `.mcp.json` + `requirements.txt` (project-local).
 
 ### Configuration
 

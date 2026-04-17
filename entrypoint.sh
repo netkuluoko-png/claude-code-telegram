@@ -1,18 +1,68 @@
 #!/bin/bash
 # Restore Claude Code OAuth credentials on startup
-
-if [ -n "$CLAUDE_CREDENTIALS_B64" ]; then
-    mkdir -p /home/claude/.claude
-    echo "$CLAUDE_CREDENTIALS_B64" | base64 -d > /home/claude/.claude/.credentials.json
-    chown -R claude:claude /home/claude/.claude
-    echo "Claude credentials restored"
-else
-    echo "WARNING: CLAUDE_CREDENTIALS_B64 not set"
-fi
+#
+# Credentials live on the persistent volume at /app/data/.claude/.credentials.json
+# so that OAuth refresh tokens (which rotate on every refresh) survive container
+# restarts. CLAUDE_CREDENTIALS_B64 is only used as a one-time seed when the volume
+# is empty (first deploy / fresh volume).
 
 # Fix volume permissions (Railway volumes mount as root)
-mkdir -p /app/data /app/data/proc_logs
+mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/project
 chown -R claude:claude /app/data
+
+# Seed /app/data/project from the image's tarball the first time the volume
+# is empty, then symlink /project to the volume. This way user edits under
+# /project persist across deploys (previously /project was rebuilt from the
+# tarball every deploy, wiping local changes).
+PROJECT_VOLUME=/app/data/project
+PROJECT_SEED=/app/project-seed.tar.gz
+if [ -z "$(ls -A "$PROJECT_VOLUME" 2>/dev/null)" ] && [ -f "$PROJECT_SEED" ]; then
+    echo "Seeding $PROJECT_VOLUME from $PROJECT_SEED (first deploy on fresh volume)"
+    tar xzf "$PROJECT_SEED" -C "$PROJECT_VOLUME/"
+    chown -R claude:claude "$PROJECT_VOLUME"
+fi
+
+# Replace /project with a symlink to the volume.
+# If /project already exists as a real directory (from the old image), remove it.
+if [ -e /project ] && [ ! -L /project ]; then
+    rm -rf /project
+fi
+ln -sfn "$PROJECT_VOLUME" /project
+chown -h claude:claude /project
+
+CREDS_PERSISTENT=/app/data/.claude/.credentials.json
+CREDS_LIVE=/home/claude/.claude/.credentials.json
+SEED_HASH_FILE=/app/data/.claude/.seed_hash
+
+mkdir -p /home/claude/.claude
+
+# Reseed when CLAUDE_CREDENTIALS_B64 is set AND its hash differs from last seed.
+# This lets the operator force-replace bad credentials by rotating the env var,
+# while normal restarts keep refreshed tokens that SDK wrote to the volume.
+if [ -n "$CLAUDE_CREDENTIALS_B64" ]; then
+    NEW_HASH=$(printf '%s' "$CLAUDE_CREDENTIALS_B64" | sha256sum | awk '{print $1}')
+    OLD_HASH=$(cat "$SEED_HASH_FILE" 2>/dev/null || echo "")
+    if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -s "$CREDS_PERSISTENT" ]; then
+        echo "Seeding Claude credentials from CLAUDE_CREDENTIALS_B64 (hash changed or missing)"
+        echo "$CLAUDE_CREDENTIALS_B64" | base64 -d > "$CREDS_PERSISTENT"
+        printf '%s' "$NEW_HASH" > "$SEED_HASH_FILE"
+    else
+        echo "Using existing Claude credentials from volume (env hash unchanged)"
+    fi
+elif [ -s "$CREDS_PERSISTENT" ]; then
+    echo "Using existing Claude credentials from volume (no env var set)"
+else
+    echo "WARNING: no credentials on volume and CLAUDE_CREDENTIALS_B64 not set"
+fi
+
+chown claude:claude "$CREDS_PERSISTENT" 2>/dev/null || true
+chmod 600 "$CREDS_PERSISTENT" 2>/dev/null || true
+
+# Symlink the live path to the volume so SDK refreshes write to persistent storage
+rm -f "$CREDS_LIVE"
+ln -s "$CREDS_PERSISTENT" "$CREDS_LIVE"
+chown -h claude:claude "$CREDS_LIVE"
+chown -R claude:claude /home/claude/.claude
 
 # Merge MCP servers into .claude/settings.json for all project directories
 # Uses Python to MERGE into existing settings (preserving permissions, hooks, etc.)

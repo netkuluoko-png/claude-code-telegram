@@ -170,12 +170,17 @@ class SQLiteSessionStorage(SessionStorage):
         logger.debug("Session marked as inactive", session_id=session_id)
 
     async def get_user_sessions(self, user_id: int) -> List[ClaudeSession]:
-        """Get all active sessions for a user."""
+        """Get all sessions for a user (including previously soft-deleted).
+
+        The is_active flag is no longer filtered: we want /resume to show the
+        full history so the user can recover chats that were auto-deactivated
+        by legacy eviction/cleanup logic.
+        """
         async with self.db_manager.get_connection() as conn:
             cursor = await conn.execute(
                 """
                 SELECT * FROM sessions
-                WHERE user_id = ? AND is_active = TRUE
+                WHERE user_id = ?
                 ORDER BY last_used DESC
             """,
                 (user_id,),

@@ -159,17 +159,9 @@ class SessionManager:
                 logger.info("Loaded session from storage", session_id=session_id)
                 return session
 
-        # Check user session limit
-        user_sessions = await self._get_user_sessions(user_id)
-        if len(user_sessions) >= self.config.max_sessions_per_user:
-            # Remove oldest session
-            oldest = min(user_sessions, key=lambda s: s.last_used)
-            await self.remove_session(oldest.session_id)
-            logger.info(
-                "Removed oldest session due to limit",
-                removed_session_id=oldest.session_id,
-                user_id=user_id,
-            )
+        # No eviction: preserve all historical sessions per (user, project) so
+        # the user can browse/resume them via /resume. The active_sessions dict
+        # is an in-memory cache only; storage is the source of truth.
 
         # Create session with empty ID — Claude will provide the real one
         new_session = ClaudeSession(

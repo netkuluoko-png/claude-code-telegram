@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 import structlog
 
 from ..config.settings import Settings
+from .exceptions import ClaudeTimeoutError
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
 from .session import SessionManager
 
@@ -41,6 +42,7 @@ class ClaudeIntegration:
         interrupt_event: Optional["asyncio.Event"] = None,
         images: Optional[List[Dict[str, str]]] = None,
         model_override: Optional[str] = None,
+        on_retry: Optional[Callable[[str], Any]] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -93,16 +95,42 @@ class ClaudeIntegration:
                     images=images,
                     model_override=model_override,
                 )
+            except ClaudeTimeoutError:
+                # Timeout during a RESUME is a distinct failure mode from a
+                # missing/expired session: the subprocess may well have
+                # partially executed the user's request (writing files, calling
+                # MCP tools) before we killed it. Silently retrying as a fresh
+                # session duplicates that work and produces a context-less
+                # "I'm about to do X" reply that confuses the user. Instead,
+                # drop the stale session so the NEXT message starts clean, and
+                # surface the timeout so the user understands what happened.
+                if should_continue:
+                    logger.warning(
+                        "Timeout during session resume; abandoning without retry",
+                        failed_session_id=claude_session_id,
+                    )
+                    await self.session_manager.remove_session(session.session_id)
+                raise
             except Exception as resume_error:
-                # If resume failed (e.g., session expired/missing on Claude's side),
-                # retry as a fresh session.  The CLI returns a generic exit-code-1
-                # when the session is gone, so we catch *any* error during resume.
+                # Other resume errors (e.g., CLI exit-1 because the session is
+                # gone on Claude's side) are safe to retry fresh: no work was
+                # started, just a lookup that failed.
                 if should_continue:
                     logger.warning(
                         "Session resume failed, starting fresh session",
                         failed_session_id=claude_session_id,
                         error=str(resume_error),
                     )
+                    if on_retry is not None:
+                        try:
+                            maybe_coro = on_retry(str(resume_error))
+                            if asyncio.iscoroutine(maybe_coro):
+                                await maybe_coro
+                        except Exception:
+                            logger.debug(
+                                "on_retry callback raised; ignoring",
+                                exc_info=True,
+                            )
                     # Clean up the stale session
                     await self.session_manager.remove_session(session.session_id)
 
@@ -282,10 +310,18 @@ class ClaudeIntegration:
             **session_summary,
         }
 
+    async def inspect_mcp_servers(
+        self, working_directory: Path
+    ) -> List[Dict[str, Any]]:
+        """Enumerate configured MCP servers and their tools."""
+        return await self.sdk_manager.inspect_mcp_servers(working_directory)
+
     async def shutdown(self) -> None:
         """Shutdown integration and cleanup resources."""
         logger.info("Shutting down Claude integration")
 
-        await self.cleanup_expired_sessions()
+        # Do not cleanup expired sessions on shutdown: sessions must survive
+        # restarts/deploys so the user can browse/resume them via /resume.
+        # Expiry is only used at read-time for auto-resume decisions.
 
         logger.info("Claude integration shutdown complete")

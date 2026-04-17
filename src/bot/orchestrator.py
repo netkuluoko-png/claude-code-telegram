@@ -343,7 +343,10 @@ class MessageOrchestrator:
             ("repo", self.agentic_repo),
             ("resume", self.agentic_resume),
             ("model", self.agentic_model),
+            ("login", self.agentic_login),
+            ("update", self.agentic_update),
             ("process", self.process_dispatch),
+            ("mcp", self.agentic_mcp),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -517,7 +520,10 @@ class MessageOrchestrator:
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("resume", "Browse & resume previous sessions"),
                 BotCommand("model", "Select Claude AI model"),
+                BotCommand("login", "Re-authorize Claude (OAuth)"),
+                BotCommand("update", "Update Claude Code CLI"),
                 BotCommand("process", "Manage processes: run/ps/kill/logs"),
+                BotCommand("mcp", "List MCP servers and their tools"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -610,6 +616,20 @@ class MessageOrchestrator:
 
         await update.message.reply_text("Session reset. What's next?")
 
+    async def _get_claude_cli_version(self) -> str:
+        """Return `claude --version` output, or 'unknown' on error."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude",
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            return stdout.decode(errors="replace").strip() or "unknown"
+        except (FileNotFoundError, asyncio.TimeoutError, OSError):
+            return "unknown"
+
     async def agentic_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -634,8 +654,77 @@ class MessageOrchestrator:
             except Exception:
                 pass
 
+        cli_version = await self._get_claude_cli_version()
         await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
+            f"📂 {dir_display} · Session: {session_status}{cost_str}\n"
+            f"🧩 Claude Code: <code>{escape_html(cli_version)}</code>",
+            parse_mode="HTML",
+        )
+
+    async def agentic_update(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Update Claude Code CLI via npm. New sessions auto-use the new binary."""
+        old_version = await self._get_claude_cli_version()
+        progress = await update.message.reply_text(
+            f"⬆️ Updating Claude Code...\nCurrent: <code>{escape_html(old_version)}</code>",
+            parse_mode="HTML",
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo",
+                "-n",
+                "npm",
+                "install",
+                "-g",
+                "@anthropic-ai/claude-code@latest",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=180.0)
+            output = stdout.decode(errors="replace")
+            rc = proc.returncode
+        except asyncio.TimeoutError:
+            await progress.edit_text(
+                "❌ npm install timed out after 3 minutes. Try again later."
+            )
+            return
+        except FileNotFoundError:
+            await progress.edit_text(
+                "❌ `sudo` or `npm` not available in container. "
+                "Rebuild needed to enable /update."
+            )
+            return
+
+        if rc != 0:
+            tail = output[-500:] if len(output) > 500 else output
+            await progress.edit_text(
+                f"❌ Update failed (exit {rc}):\n<pre>{escape_html(tail)}</pre>",
+                parse_mode="HTML",
+            )
+            return
+
+        new_version = await self._get_claude_cli_version()
+        changed = new_version != old_version
+        arrow = " → " if changed else " = "
+        status_emoji = "✅" if changed else "ℹ️"
+        note = (
+            "New requests will use the updated CLI automatically."
+            if changed
+            else "Already on the latest version."
+        )
+        await progress.edit_text(
+            f"{status_emoji} Claude Code updated.\n"
+            f"<code>{escape_html(old_version)}</code>{arrow}"
+            f"<code>{escape_html(new_version)}</code>\n\n{note}",
+            parse_mode="HTML",
+        )
+        logger.info(
+            "Claude CLI updated via /update",
+            user_id=update.effective_user.id,
+            old=old_version,
+            new=new_version,
         )
 
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1096,12 +1185,109 @@ class MessageOrchestrator:
                     error=str(e),
                 )
 
+    async def agentic_login(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Start OAuth re-auth flow. Sends authorize URL; next text msg is the code."""
+        from .features.oauth_login import start_login
+
+        pending = start_login()
+        context.user_data["oauth_pending"] = {
+            "verifier": pending.verifier,
+            "state": pending.state,
+            "started_at": time.time(),
+        }
+        await update.message.reply_text(
+            "🔐 <b>Claude re-authorization</b>\n\n"
+            "1. Open this URL in a browser and sign in:\n"
+            f"<code>{escape_html(pending.authorize_url)}</code>\n\n"
+            "2. After approving, the page will show a code (format: "
+            "<code>abc...#state...</code>). Copy it and send it back here "
+            "as a plain message.\n\n"
+            "You can also paste the full callback URL. "
+            "Send /new to cancel.",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    async def _handle_oauth_code_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str
+    ) -> None:
+        """Exchange the pasted OAuth code for tokens and write credentials."""
+        from .features.oauth_login import (
+            exchange_code,
+            parse_code_input,
+            write_credentials,
+        )
+
+        pending = context.user_data.get("oauth_pending") or {}
+        verifier = pending.get("verifier")
+        expected_state = pending.get("state")
+        if not verifier or not expected_state:
+            context.user_data.pop("oauth_pending", None)
+            await update.message.reply_text(
+                "No pending login. Run /login to start."
+            )
+            return
+
+        # 10 min timeout for the OAuth code
+        if time.time() - float(pending.get("started_at") or 0) > 600:
+            context.user_data.pop("oauth_pending", None)
+            await update.message.reply_text(
+                "⌛ Login timed out. Run /login to start again."
+            )
+            return
+
+        try:
+            code, got_state = parse_code_input(raw)
+        except ValueError as e:
+            await update.message.reply_text(
+                f"❌ Can't parse code: {e}. Paste the code from the callback page "
+                "(or the full URL), or /new to cancel."
+            )
+            return
+
+        if got_state and got_state != expected_state:
+            context.user_data.pop("oauth_pending", None)
+            await update.message.reply_text(
+                "❌ State mismatch. Run /login again."
+            )
+            return
+
+        try:
+            token_resp = await exchange_code(code, verifier, expected_state)
+            path = write_credentials(token_resp)
+        except Exception as e:
+            logger.error("OAuth exchange failed", user_id=update.effective_user.id, error=str(e))
+            await update.message.reply_text(
+                f"❌ Token exchange failed: {escape_html(str(e))}\n\n"
+                "Run /login to try again.",
+                parse_mode="HTML",
+            )
+            return
+        finally:
+            context.user_data.pop("oauth_pending", None)
+
+        logger.info(
+            "OAuth credentials refreshed via /login",
+            user_id=update.effective_user.id,
+            path=str(path),
+        )
+        await update.message.reply_text(
+            "✅ Authorized. You can use the bot now."
+        )
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
         user_id = update.effective_user.id
         message_text = update.message.text
+
+        # If user is in /login flow, treat this message as the OAuth code.
+        if context.user_data.get("oauth_pending"):
+            await self._handle_oauth_code_message(update, context, message_text)
+            return
 
         logger.info(
             "Agentic text message",
@@ -1190,6 +1376,19 @@ class MessageOrchestrator:
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
 
+        # Callback fired by the facade when a resume fails and a fresh retry
+        # is about to start. Notifies the user and clears stale tool output so
+        # the verbose stream doesn't mix aborted + fresh runs.
+        async def _on_fresh_retry(_error: str) -> None:
+            tool_log.clear()
+            try:
+                await progress_msg.edit_text(
+                    "🔄 Previous session expired — starting fresh...",
+                    reply_markup=stop_kb,
+                )
+            except Exception:
+                logger.debug("Failed to edit progress on fresh-retry notice")
+
         success = True
         try:
             claude_response = await claude_integration.run_command(
@@ -1201,6 +1400,7 @@ class MessageOrchestrator:
                 force_new=force_new,
                 interrupt_event=interrupt_event,
                 model_override=self._get_preferred_model(context),
+                on_retry=_on_fresh_retry,
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1246,6 +1446,11 @@ class MessageOrchestrator:
         except Exception as e:
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
+            # The stored session_id may now point at an abandoned session
+            # (facade drops it on timeout-during-resume). Clear it so the
+            # NEXT message starts fresh instead of attempting another resume
+            # against the same dead session.
+            context.user_data["claude_session_id"] = None
             from .handlers.message import _format_error_message
             from .utils.formatting import FormattedMessage
 
@@ -1787,9 +1992,14 @@ class MessageOrchestrator:
         current_dir = context.user_data.get("current_directory", base)
 
         if args:
-            # Switch to named repo
+            # Switch to named repo, or back to base with /, ., .., ~
             target_name = args[0]
-            target_path = base / target_name
+            if target_name in ("/", ".", "..", "~", "base"):
+                target_path = base
+                display_name = "base"
+            else:
+                target_path = base / target_name
+                display_name = target_name
             if not target_path.is_dir():
                 await update.message.reply_text(
                     f"Directory not found: <code>{escape_html(target_name)}</code>",
@@ -1815,7 +2025,7 @@ class MessageOrchestrator:
             session_badge = " · session resumed" if session_id else ""
 
             await update.message.reply_text(
-                f"Switched to <code>{escape_html(target_name)}/</code>"
+                f"Switched to <code>{escape_html(display_name)}/</code>"
                 f"{git_badge}{session_badge}",
                 parse_mode="HTML",
             )
@@ -1845,7 +2055,14 @@ class MessageOrchestrator:
 
         lines: List[str] = []
         keyboard_rows: List[list] = []  # type: ignore[type-arg]
-        current_name = current_dir.name if current_dir != base else None
+        at_base = current_dir == base
+        current_name = current_dir.name if not at_base else None
+
+        base_marker = " \u25c0" if at_base else ""
+        lines.append(f"\U0001f3e0 <code>base/</code>{base_marker}")
+        keyboard_rows.append(
+            [InlineKeyboardButton("\U0001f3e0 base", callback_data="cd:/")]
+        )
 
         for d in entries:
             is_git = (d / ".git").is_dir()
@@ -1869,6 +2086,87 @@ class MessageOrchestrator:
             parse_mode="HTML",
             reply_markup=reply_markup,
         )
+
+    # ── /mcp: list configured MCP servers and their tools ──────────────
+
+    async def agentic_mcp(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show MCP servers visible to the current session, with tool lists."""
+        base = self.settings.approved_directory
+        current_dir: Path = context.user_data.get("current_directory", base)
+
+        claude_integration = context.bot_data.get("claude_integration")
+        if not claude_integration:
+            await update.message.reply_text("Claude integration not available.")
+            return
+
+        sent = await update.message.reply_text(
+            "\U0001f50e Inspecting MCP servers in "
+            f"<code>{escape_html(current_dir.name or str(current_dir))}/</code>…",
+            parse_mode="HTML",
+        )
+
+        try:
+            servers = await claude_integration.inspect_mcp_servers(current_dir)
+        except Exception as e:
+            await sent.edit_text(
+                f"Failed to inspect MCP servers: <code>{escape_html(str(e))}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        if not servers:
+            await sent.edit_text("No MCP servers configured.")
+            return
+
+        lines: List[str] = [
+            f"<b>MCP servers</b> in "
+            f"<code>{escape_html(current_dir.name or str(current_dir))}/</code>"
+        ]
+        total_tools = 0
+        for s in servers:
+            name = escape_html(str(s["name"]))
+            origin = s["origin"]
+            badge = "\U0001f916" if origin == "bot" else "\U0001f4e6"
+            if "error" in s:
+                lines.append(
+                    f"\n{badge} <b>{name}</b> \u2014 "
+                    f"<i>{escape_html(s['error'])}</i>"
+                )
+                continue
+            tools = s.get("tools") or []
+            total_tools += len(tools)
+            lines.append(f"\n{badge} <b>{name}</b> \u2014 {len(tools)} tool(s)")
+            for tool in tools:
+                lines.append(f"  • <code>{escape_html(tool)}</code>")
+
+        lines.append(f"\n<i>Total tools: {total_tools}</i>")
+
+        # Audit
+        audit_logger = context.bot_data.get("audit_logger")
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=update.effective_user.id,
+                command="mcp",
+                args=[str(current_dir)],
+                success=True,
+            )
+
+        text = "\n".join(lines)
+        # Telegram message cap is 4096; chunk if large
+        if len(text) <= 4000:
+            await sent.edit_text(text, parse_mode="HTML")
+        else:
+            await sent.delete()
+            chunk = ""
+            for line in lines:
+                if len(chunk) + len(line) + 1 > 3800:
+                    await update.message.reply_text(chunk, parse_mode="HTML")
+                    chunk = ""
+                chunk += line + "\n"
+            if chunk:
+                await update.message.reply_text(chunk, parse_mode="HTML")
 
     # ── /process: background process management ────────────────────────
 
@@ -2059,12 +2357,10 @@ class MessageOrchestrator:
         # Get all active sessions for this user
         all_sessions = await session_mgr._get_user_sessions(user_id)
 
-        # Filter: same project directory, not expired
+        # Filter by project directory only — show all sessions regardless of age
+        # so the user can resume any previous chat after restarts/deploys.
         sessions = [
-            s
-            for s in all_sessions
-            if str(s.project_path) == str(current_dir)
-            and not s.is_expired(self.settings.session_timeout_hours)
+            s for s in all_sessions if str(s.project_path) == str(current_dir)
         ]
 
         if not sessions:
@@ -2106,7 +2402,7 @@ class MessageOrchestrator:
         rel_dir = current_dir.name if current_dir != self.settings.approved_directory else str(current_dir)
         lines = [
             f"<b>Sessions for</b> <code>{escape_html(rel_dir)}/</code>"
-            f" ({total} total)\n"
+            f" ({total} total \u00b7 page {page + 1}/{max_page + 1})\n"
         ]
 
         keyboard = []
@@ -2267,11 +2563,16 @@ class MessageOrchestrator:
         _, project_name = data.split(":", 1)
 
         base = self.settings.approved_directory
-        new_path = base / project_name
+        if project_name in ("/", ".", "..", "~", "base", ""):
+            new_path = base
+            display_name = "base"
+        else:
+            new_path = base / project_name
+            display_name = project_name
 
         if not new_path.is_dir():
             await query.edit_message_text(
-                f"Directory not found: <code>{escape_html(project_name)}</code>",
+                f"Directory not found: <code>{escape_html(display_name)}</code>",
                 parse_mode="HTML",
             )
             return
@@ -2294,7 +2595,7 @@ class MessageOrchestrator:
         session_badge = " · session resumed" if session_id else ""
 
         await query.edit_message_text(
-            f"Switched to <code>{escape_html(project_name)}/</code>"
+            f"Switched to <code>{escape_html(display_name)}/</code>"
             f"{git_badge}{session_badge}",
             parse_mode="HTML",
         )
@@ -2305,6 +2606,6 @@ class MessageOrchestrator:
             await audit_logger.log_command(
                 user_id=query.from_user.id,
                 command="cd",
-                args=[project_name],
+                args=[display_name],
                 success=True,
             )

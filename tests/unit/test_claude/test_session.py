@@ -290,38 +290,35 @@ class TestSessionManager:
 
         assert session2.session_id == "real-session-id"
 
-    async def test_session_limit_enforcement(self, session_manager):
-        """Test session limit enforcement."""
-        # Seed sessions that have already received real IDs (simulating
-        # the full create -> Claude responds -> update_session lifecycle)
-        for i, path in enumerate(["/test/project1", "/test/project2"], start=1):
+    async def test_sessions_preserved_no_eviction(self, session_manager):
+        """Session creation never evicts older sessions.
+
+        Storage is the source of truth; active_sessions is just an in-memory
+        cache. Historical sessions stay browsable/resumable via /resume, so
+        creating a new session must leave all prior sessions intact.
+        """
+        # Seed multiple sessions across projects (more than max_sessions_per_user=2)
+        for i in range(1, 4):
             s = ClaudeSession(
                 session_id=f"session-{i}",
                 user_id=123,
-                project_path=Path(path),
+                project_path=Path(f"/test/project-{i}"),
                 created_at=datetime.now(UTC),
-                last_used=datetime.now(UTC) - timedelta(hours=i),  # older = higher i
+                last_used=datetime.now(UTC) - timedelta(hours=i),
             )
             await session_manager.storage.save_session(s)
             session_manager.active_sessions[s.session_id] = s
 
-        # Verify we have 2 sessions
-        assert len(await session_manager._get_user_sessions(123)) == 2
+        assert len(await session_manager._get_user_sessions(123)) == 3
 
-        # Creating third session should remove the oldest (session-2)
+        # Creating a new session must NOT evict anyone
         await session_manager.get_or_create_session(
-            user_id=123, project_path=Path("/test/project3")
+            user_id=123, project_path=Path("/test/project-new")
         )
 
-        # After eviction, only session-1 remains persisted
-        # (session-2 evicted, session-3 is new/unsaved so not yet in storage)
         persisted = await session_manager._get_user_sessions(123)
-        assert len(persisted) == 1  # Only session-1 persisted
-        assert persisted[0].session_id == "session-1"
-
-        # session-2 should be gone
-        loaded = await session_manager.storage.load_session("session-2", user_id=123)
-        assert loaded is None
+        persisted_ids = {s.session_id for s in persisted}
+        assert persisted_ids == {"session-1", "session-2", "session-3"}
 
     async def test_get_or_create_rejects_wrong_user_active_cache(self, session_manager):
         """Requesting another user's session via active cache creates a new one."""

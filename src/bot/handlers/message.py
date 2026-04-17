@@ -117,10 +117,13 @@ def _format_error_message(error: Exception | str) -> str:
         return (
             "⏰ <b>Request Timeout</b>\n\n"
             f"{escape_html(error_str)}\n\n"
+            "Your previous session was abandoned to avoid redoing work that "
+            "may have already partially completed. The next message will "
+            "start a <b>fresh session</b>.\n\n"
             "<b>What you can do:</b>\n"
-            "• Try breaking your request into smaller parts\n"
-            "• Avoid asking for very large file operations in one go\n"
-            "• Try again — transient slowdowns happen"
+            "• Check whether the task was already done (files/commits/processes)\n"
+            "• Rephrase your request — the new session has no prior context\n"
+            "• Break large requests into smaller steps"
         )
 
     if isinstance(error_obj, ClaudeMCPError):

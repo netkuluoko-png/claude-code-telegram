@@ -294,3 +294,93 @@ class TestEmptySessionIdWarning:
 
         # Session ID should be empty on the response
         assert not result.session_id
+
+
+class TestTimeoutDuringResume:
+    """Verify timeout during resume drops session and does NOT silently retry.
+
+    Silently retrying as fresh session would duplicate work (subprocess may
+    have partially executed) and produce a context-less reply that looks like
+    "I'm about to do X" to the user.
+    """
+
+    async def test_timeout_during_resume_raises_and_drops_session(
+        self, facade, session_manager
+    ):
+        from src.claude.exceptions import ClaudeTimeoutError
+
+        project = Path("/test/project")
+        user_id = 123
+
+        existing = ClaudeSession(
+            session_id="real-session-id",
+            user_id=user_id,
+            project_path=project,
+            created_at=datetime.utcnow(),
+            last_used=datetime.utcnow(),
+        )
+        await session_manager.storage.save_session(existing)
+        session_manager.active_sessions[existing.session_id] = existing
+
+        with patch.object(
+            facade,
+            "_execute",
+            side_effect=ClaudeTimeoutError("timed out after 600s"),
+        ):
+            with pytest.raises(ClaudeTimeoutError):
+                await facade.run_command(
+                    prompt="hello",
+                    working_directory=project,
+                    user_id=user_id,
+                    session_id="real-session-id",
+                )
+
+        # Stale session must have been removed so next message starts fresh
+        assert "real-session-id" not in session_manager.active_sessions
+        loaded = await session_manager.storage.load_session(
+            "real-session-id", user_id=user_id
+        )
+        assert loaded is None
+
+    async def test_non_timeout_resume_error_still_retries_fresh(
+        self, facade, session_manager
+    ):
+        """Non-timeout errors (e.g., session missing on Claude side) still
+        retry as fresh session — that path wasn't broken."""
+        project = Path("/test/project")
+        user_id = 123
+
+        existing = ClaudeSession(
+            session_id="real-session-id",
+            user_id=user_id,
+            project_path=project,
+            created_at=datetime.utcnow(),
+            last_used=datetime.utcnow(),
+        )
+        await session_manager.storage.save_session(existing)
+        session_manager.active_sessions[existing.session_id] = existing
+
+        call_count = {"n": 0}
+        retry_errors = []
+
+        async def fake_execute(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("session expired on Claude side")
+            return _make_mock_response(session_id="fresh-session-id")
+
+        async def on_retry(err: str) -> None:
+            retry_errors.append(err)
+
+        with patch.object(facade, "_execute", side_effect=fake_execute):
+            result = await facade.run_command(
+                prompt="hello",
+                working_directory=project,
+                user_id=user_id,
+                session_id="real-session-id",
+                on_retry=on_retry,
+            )
+
+        assert call_count["n"] == 2
+        assert result.session_id == "fresh-session-id"
+        assert retry_errors == ["session expired on Claude side"]

@@ -336,39 +336,45 @@ class ClaudeSDKManager:
                 },
                 system_prompt=base_prompt,
                 setting_sources=["project", "user"],
+                # Force the CLI to honour only the MCP servers we pass via
+                # --mcp-config, ignoring the project's .mcp.json entirely.
+                # Without this flag the CLI still tries to load project MCPs
+                # (e.g. broken Windows paths) and enters a "launched but not
+                # connected" state that also shadows our bot MCPs.
+                extra_args={"strict-mcp-config": None, "debug-to-stderr": None},
                 stderr=_stderr_callback,
             )
 
-            # Merge MCP server configurations:
-            # 1. Auto-discover built-in process-manager from mcp-process.json
-            # 2. Merge with user-configured MCP servers (ENABLE_MCP + MCP_CONFIG_PATH)
+            bot_mcp_servers, project_mcp_servers = self._build_mcp_servers(
+                working_directory
+            )
+            # Install each project MCP's Python deps (if requirements.txt is
+            # present next to its script) so the stdio subprocess can import
+            # them. Keyed by hash of requirements.txt → persistent cache on
+            # the data volume, re-installed only when the file changes.
+            for name, cfg in project_mcp_servers.items():
+                await self._ensure_mcp_deps(name, cfg)
+
             mcp_servers: Dict[str, Any] = {}
-
-            app_root = Path(__file__).resolve().parent.parent.parent
-            process_mcp_path = app_root / "mcp-process.json"
-            if process_mcp_path.exists():
-                auto_mcp = self._load_mcp_config(process_mcp_path)
-                # Fix cwd and PYTHONPATH for all auto-discovered servers
-                for server_name in auto_mcp:
-                    auto_mcp[server_name]["cwd"] = str(app_root)
-                    auto_mcp[server_name].setdefault("env", {})
-                    auto_mcp[server_name]["env"]["PYTHONPATH"] = str(app_root)
-                mcp_servers.update(auto_mcp)
-
-            if self.config.enable_mcp and self.config.mcp_config_path:
-                mcp_servers.update(self._load_mcp_config(self.config.mcp_config_path))
+            mcp_servers.update(project_mcp_servers)
+            mcp_servers.update(bot_mcp_servers)
 
             if mcp_servers:
                 options.mcp_servers = mcp_servers
                 logger.info(
                     "MCP servers configured",
-                    servers=list(mcp_servers.keys()),
+                    project_servers=list(project_mcp_servers.keys()),
+                    bot_servers=list(bot_mcp_servers.keys()),
                 )
 
             # Ensure .claude/settings.json and .claude/rules/ exist in working_directory
             # so the CLI picks up MCP tools regardless of which project is active
             self._ensure_mcp_settings(working_directory, mcp_servers)
             self._ensure_mcp_rules(working_directory)
+            # Pre-approve project MCP servers in the user-scope state file so the
+            # CLI attaches them automatically (avoids "launched but not connected"
+            # limbo when a project .mcp.json exists).
+            self._approve_project_mcps(working_directory, mcp_servers)
 
             # Wire can_use_tool callback for preventive tool validation
             if self.security_validator:
@@ -809,15 +815,28 @@ class ClaudeSDKManager:
             except (json.JSONDecodeError, OSError):
                 existing = {}
 
-            # Skip if MCP config already matches
-            if existing.get("mcpServers") == mcp_servers:
-                return
-
         existing.setdefault("permissions", {}).setdefault("allow", [])
         for perm in desired["permissions"]["allow"]:
             if perm not in existing["permissions"]["allow"]:
                 existing["permissions"]["allow"].append(perm)
         existing["mcpServers"] = mcp_servers
+
+        # Auto-approve only the MCP names we validated and kept. This prevents
+        # a broken entry left in the project's .mcp.json from blocking the
+        # non-interactive approval flow and cascading onto healthy servers.
+        enabled_servers = sorted(mcp_servers.keys())
+        existing["enabledMcpjsonServers"] = enabled_servers
+        existing["enableAllProjectMcpServers"] = False
+
+        # Skip the write when nothing needs to change (avoids spurious fsync
+        # and log spam on repeat invocations).
+        if settings_path.exists():
+            try:
+                on_disk = json.loads(settings_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                on_disk = None
+            if on_disk == existing:
+                return
 
         try:
             settings_dir.mkdir(parents=True, exist_ok=True)
@@ -835,6 +854,86 @@ class ClaudeSDKManager:
             )
 
     @staticmethod
+    def _approve_project_mcps(
+        working_directory: Path, mcp_servers: Dict[str, Any]
+    ) -> None:
+        """Auto-approve project-level MCP servers in ~/.claude.json.
+
+        Claude CLI stores per-project MCP approval under
+        `.projects.<abs_path>.enabledMcpjsonServers`. Until each server is
+        approved, the CLI reports them as "launched but not connected" and
+        does not surface their tools. Writing the approval list preemptively
+        matches the state the CLI would record after an interactive "trust"
+        prompt — which the bot cannot answer in its non-interactive flow.
+
+        Also pre-approves every server listed in the project's own `.mcp.json`
+        (including names we filtered out of options.mcp_servers). Leaving an
+        entry unapproved keeps the CLI in the "needs approval" state for the
+        whole session, which suppresses otherwise-healthy servers.
+        """
+        import json
+
+        user_config = Path.home() / ".claude.json"
+        try:
+            data: Dict[str, Any] = (
+                json.loads(user_config.read_text()) if user_config.exists() else {}
+            )
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "Failed to read user claude.json; skipping MCP approval",
+                path=str(user_config),
+                error=str(e),
+            )
+            return
+
+        project_mcp_file = working_directory / ".mcp.json"
+        discovered_from_mcp_json: List[str] = []
+        if project_mcp_file.exists():
+            try:
+                mcp_data = json.loads(project_mcp_file.read_text())
+                discovered_from_mcp_json = list(
+                    (mcp_data.get("mcpServers") or {}).keys()
+                )
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        approved = sorted(set(mcp_servers.keys()) | set(discovered_from_mcp_json))
+
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            projects = {}
+            data["projects"] = projects
+        key = str(working_directory)
+        entry = projects.setdefault(key, {})
+        if not isinstance(entry, dict):
+            entry = {}
+            projects[key] = entry
+
+        existing_approved = entry.get("enabledMcpjsonServers") or []
+        merged = sorted(set(existing_approved) | set(approved))
+        if merged == sorted(existing_approved) and entry.get(
+            "hasTrustDialogAccepted"
+        ) is True:
+            return
+
+        entry["enabledMcpjsonServers"] = merged
+        entry["hasTrustDialogAccepted"] = True
+
+        try:
+            user_config.write_text(json.dumps(data, indent=2))
+            logger.info(
+                "Approved project MCP servers in user config",
+                working_directory=key,
+                approved=merged,
+            )
+        except OSError as e:
+            logger.warning(
+                "Failed to write MCP approval to user config",
+                path=str(user_config),
+                error=str(e),
+            )
+
+    @staticmethod
     def _ensure_mcp_rules(working_directory: Path) -> None:
         """Ensure .claude/rules/mcp-guide.md exists in working_directory.
 
@@ -844,73 +943,107 @@ class ClaudeSDKManager:
         rules_dir = Path(working_directory) / ".claude" / "rules"
         rules_path = rules_dir / "mcp-guide.md"
 
-        if rules_path.exists():
-            return
-
         content = """\
-# MCP Configuration Guide
+# MCP Configuration Guide (bot-generated)
 
-## Available MCP Tools
+This file is rewritten on every session. Do not hand-edit.
 
-Process Manager tools persist background processes across sessions:
+## Tools always available (bot-provided)
+
+Process manager — persists background processes across Claude sessions:
 
 - `process_run(command, cwd, name)` — start a background process
-- `process_ps()` — list all managed processes
-- `process_logs(process_id, lines)` — view process output
+- `process_ps()` — list managed processes
+- `process_logs(process_id, lines)` — view output
 - `process_kill(process_id)` — stop a process
 - `process_cleanup()` — remove dead processes
 
-Always use the process manager instead of running servers directly — \
-direct processes die when the session ends.
+Always use the process manager instead of launching servers with a raw
+`Bash` call. Direct processes are killed when the Claude session ends.
 
-## Telegram Tools
+Telegram bot helpers — send files back to the user's chat:
 
-Send files and images directly to the user's Telegram chat:
+- `send_file_to_user(file_path, caption)` — any file (max 50 MB)
+- `send_image_to_user(file_path, caption)` — image with inline preview
+  (png, jpg, jpeg, gif, webp, bmp, svg)
 
-- `send_file_to_user(file_path, caption)` — send any file as a document attachment. \
-Use when the user asks to receive, download, or get a file from the server. \
-The file_path must be absolute and within the approved working directory. Max 50 MB.
-- `send_image_to_user(file_path, caption)` — send an image with inline preview. \
-Supported formats: png, jpg, jpeg, gif, webp, bmp, svg.
+Both accept absolute paths inside the approved working directory only,
+and deliver the file automatically after your response.
 
-Both tools validate the file and queue it for delivery — \
-the actual Telegram message is sent automatically after your response.
+## How MCP is wired in this bot
 
-## How MCP is Configured
+For every session the bot builds a merged MCP list and hands it to Claude
+CLI via `--mcp-config` plus `--strict-mcp-config`. Sources, in precedence
+(bot wins on name collisions):
 
-MCP servers are registered in `.claude/settings.json` under `mcpServers`. \
-This file is auto-generated by the bot in every working directory.
+1. **Project-local**: `<project>/.mcp.json` and `<project>/.claude/settings.json`
+   (entries whose `cwd` is missing or uses a Windows drive letter are
+   dropped with a warning).
+2. **Bot-owned**: `/app/mcp-process.json` — `process-manager`, `telegram`.
+3. **User-configured**: `MCP_CONFIG_PATH` env var if `ENABLE_MCP=true`.
 
-The configuration is also passed via `options.mcp_servers` in the SDK. \
-Both mechanisms are used for reliability.
+Because of `--strict-mcp-config`, the CLI ignores any native MCP approval
+dialog. There is nothing for you to "trust" — if a server is in the
+merged dict, the CLI attaches it.
 
-## Adding a New MCP Server
+## Auto-install of project MCP dependencies
 
-1. Create a FastMCP server (see `/app/src/process/mcp_server.py` as example)
-   - Use `mcp.run(transport="stdio")` — Claude CLI uses stdio, not HTTP
-2. Add it to `/app/mcp-process.json`:
-   ```json
-   {
-     "mcpServers": {
-       "my-server": {
-         "command": "python",
-         "args": ["-m", "src.mcp.my_server"],
-         "cwd": "/app",
-         "env": { "PYTHONPATH": "/app" }
-       }
-     }
-   }
-   ```
-   **`env.PYTHONPATH`** is required — the CLI ignores `cwd` for module resolution.
-3. Update `entrypoint.sh` — it writes `.claude/settings.json` to project dirs
-4. Deploy — all new sessions will see the tools automatically
+If a project MCP config points to `cwd: /path/to/server_dir` and that
+directory contains `requirements.txt`, the bot automatically runs:
 
-## Do NOT
+    pip install --target /app/data/.mcp_deps/<server>-<hash> -r requirements.txt
 
-- Do NOT add CLI fallback commands to CLAUDE.md as a workaround
-- Do NOT use `mcp.run()` without `transport="stdio"`
-- Do NOT omit `env.PYTHONPATH` from MCP server config
+before spawning the subprocess, and prepends the target to the server's
+`PYTHONPATH`. The cache is keyed by sha256 of `requirements.txt`, so the
+install happens once per requirements snapshot and is re-used on next
+sessions. Change `requirements.txt` → new hash → re-install.
+
+Installs live on the `/app/data` volume, so they survive deploys and
+container restarts.
+
+**What you should do when a project MCP is missing dependencies:**
+
+1. Put a `requirements.txt` next to the MCP's server script (in the same
+   directory that the `.mcp.json` entry uses as `cwd`).
+2. List every third-party module the server imports (e.g. `telethon`,
+   `aiosqlite`).
+3. Run `/mcp` in the bot — the next inspection (or any Claude session)
+   will install them and attach the server.
+
+Do **not** try to `pip install --user …` from inside the Claude session:
+`~/.local` is not on the persistent volume and the install is wiped on
+the next deploy. Put the deps in `requirements.txt` and let the bot
+cache them.
+
+## Adding a new bot-owned MCP server
+
+1. Create a FastMCP server in `src/mcp/` or `src/process/`. Import from
+   `fastmcp` (`from fastmcp import FastMCP`) and launch with
+   `mcp.run(transport="stdio")`. Stdio is mandatory — the CLI does not
+   speak HTTP to local MCPs.
+2. Register it in `/app/mcp-process.json` under `mcpServers` with an
+   explicit `env.PYTHONPATH=/app` (the CLI ignores `cwd` for module
+   resolution, so without PYTHONPATH your module will not import).
+3. Mirror the same entry in `entrypoint.sh` so existing project folders
+   on the volume pick it up on next restart.
+4. Deploy. Every session will see the new tools automatically.
+
+## Common mistakes — don't
+
+- Do not add bash fallbacks to `CLAUDE.md` when an MCP is missing. Fix
+  the MCP config or its `requirements.txt` instead.
+- Do not launch FastMCP with the default HTTP transport.
+- Do not omit `env.PYTHONPATH`.
+- Do not hard-code Windows paths (`D:\\…`) in `.mcp.json` — this is a
+  Linux container. Such entries are filtered out on load.
+- Do not install MCP deps into `~/.local` — they will be lost on deploy.
 """
+
+        try:
+            if rules_path.exists() and rules_path.read_text() == content:
+                return
+        except OSError:
+            pass
 
         try:
             rules_dir.mkdir(parents=True, exist_ok=True)
@@ -921,6 +1054,284 @@ Both mechanisms are used for reliability.
                 path=str(rules_path),
                 error=str(e),
             )
+
+    async def _ensure_mcp_deps(
+        self, server_name: str, cfg: Dict[str, Any]
+    ) -> None:
+        """Install `requirements.txt` next to a project MCP into a persistent
+        cache, and prepend it to the server's PYTHONPATH.
+
+        Rationale: project-local stdio MCP servers (e.g. TG_mcp_clon/server.py)
+        import third-party libs (telethon, aiosqlite, …) that are not in the
+        bot's image. User-site pip installs don't persist across deploys, so
+        we cache installs on the `/app/data` volume keyed by a hash of the
+        requirements file. Re-install only when the file changes.
+        """
+        import hashlib
+
+        cwd_str = cfg.get("cwd")
+        if not isinstance(cwd_str, str) or not cwd_str:
+            return
+        cwd = Path(cwd_str)
+        if not cwd.is_dir():
+            return
+        req_file = cwd / "requirements.txt"
+        if not req_file.is_file():
+            return
+
+        try:
+            req_bytes = req_file.read_bytes()
+        except OSError:
+            return
+        req_hash = hashlib.sha256(req_bytes).hexdigest()[:12]
+
+        deps_root = Path("/app/data/.mcp_deps")
+        target = deps_root / f"{server_name}-{req_hash}"
+        marker = target / ".installed"
+
+        if not marker.exists():
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                logger.warning(
+                    "Cannot create MCP deps dir",
+                    server=server_name,
+                    target=str(target),
+                    error=str(e),
+                )
+                return
+            logger.info(
+                "Installing MCP server deps",
+                server=server_name,
+                requirements=str(req_file),
+                target=str(target),
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--disable-pip-version-check",
+                    "--no-warn-script-location",
+                    "--target",
+                    str(target),
+                    "-r",
+                    str(req_file),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "pip not available, skipping MCP deps install",
+                    server=server_name,
+                )
+                return
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(), timeout=600
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning("MCP deps install timed out", server=server_name)
+                return
+            if proc.returncode != 0:
+                logger.warning(
+                    "MCP deps install failed",
+                    server=server_name,
+                    returncode=proc.returncode,
+                    stderr=(stderr_b or b"").decode(errors="replace")[-500:],
+                )
+                return
+            try:
+                marker.write_text(req_hash)
+            except OSError:
+                pass
+            logger.info(
+                "MCP deps ready", server=server_name, target=str(target)
+            )
+
+        env = cfg.get("env")
+        if not isinstance(env, dict):
+            env = {}
+            cfg["env"] = env
+        target_str = str(target)
+        existing = env.get("PYTHONPATH", "")
+        parts = existing.split(":") if existing else []
+        if target_str not in parts:
+            parts.insert(0, target_str)
+            env["PYTHONPATH"] = ":".join(parts)
+
+    def _build_mcp_servers(
+        self, working_directory: Path
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Build the bot + project MCP server dicts for a working directory.
+
+        Returns a (bot_servers, project_servers) tuple where bot-owned names
+        are authoritative and project-local entries sharing those names are
+        filtered out (see `_load_project_mcps`).
+        """
+        bot_servers: Dict[str, Any] = {}
+
+        app_root = Path(__file__).resolve().parent.parent.parent
+        process_mcp_path = app_root / "mcp-process.json"
+        if process_mcp_path.exists():
+            auto_mcp = self._load_mcp_config(process_mcp_path)
+            for server_name in auto_mcp:
+                auto_mcp[server_name]["cwd"] = str(app_root)
+                auto_mcp[server_name].setdefault("env", {})
+                auto_mcp[server_name]["env"]["PYTHONPATH"] = str(app_root)
+            bot_servers.update(auto_mcp)
+
+        if self.config.enable_mcp and self.config.mcp_config_path:
+            bot_servers.update(self._load_mcp_config(self.config.mcp_config_path))
+
+        project_servers = self._load_project_mcps(
+            working_directory, exclude_names=set(bot_servers.keys())
+        )
+        return bot_servers, project_servers
+
+    async def inspect_mcp_servers(
+        self, working_directory: Path
+    ) -> List[Dict[str, Any]]:
+        """Enumerate MCP servers and their tools for `working_directory`.
+
+        Each returned entry has keys: name, origin ("bot" or "project"),
+        command, args, cwd, tools (list[str] on success) or error (str).
+        """
+        # Refresh the on-disk rules doc so the project folder stays in sync
+        # with the bot's current MCP contract.
+        self._ensure_mcp_rules(working_directory)
+
+        bot_servers, project_servers = self._build_mcp_servers(working_directory)
+        for name, cfg in project_servers.items():
+            await self._ensure_mcp_deps(name, cfg)
+
+        combined: List[tuple[str, str, Dict[str, Any]]] = []
+        for name, cfg in project_servers.items():
+            combined.append((name, "project", cfg))
+        for name, cfg in bot_servers.items():
+            combined.append((name, "bot", cfg))
+
+        results: List[Dict[str, Any]] = []
+        for name, origin, cfg in combined:
+            entry: Dict[str, Any] = {
+                "name": name,
+                "origin": origin,
+                "command": cfg.get("command"),
+                "args": cfg.get("args") or [],
+                "cwd": cfg.get("cwd"),
+            }
+            try:
+                tools = await asyncio.wait_for(
+                    self._list_tools_for_server(cfg), timeout=10
+                )
+                entry["tools"] = tools
+                logger.info(
+                    "MCP inspect ok",
+                    server=name,
+                    origin=origin,
+                    tool_count=len(tools),
+                )
+            except asyncio.TimeoutError:
+                entry["error"] = "timed out after 10s"
+                logger.warning(
+                    "MCP inspect timeout", server=name, origin=origin
+                )
+            except Exception as e:
+                err_msg = f"{type(e).__name__}: {e}"
+                # Truncate long errors so they fit Telegram HTML rendering
+                if len(err_msg) > 300:
+                    err_msg = err_msg[:297] + "..."
+                entry["error"] = err_msg
+                logger.warning(
+                    "MCP inspect failed",
+                    server=name,
+                    origin=origin,
+                    error=err_msg,
+                )
+            results.append(entry)
+        return results
+
+    @staticmethod
+    async def _list_tools_for_server(cfg: Dict[str, Any]) -> List[str]:
+        """Spawn a stdio MCP server subprocess and query tools/list.
+
+        Captures subprocess stderr so import-time crashes surface as a
+        readable reason instead of a generic ExceptionGroup.
+        """
+        import tempfile
+
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        command = cfg.get("command")
+        if not isinstance(command, str) or not command:
+            raise ValueError("missing command")
+
+        server_env = dict(os.environ)
+        cfg_env = cfg.get("env") or {}
+        if isinstance(cfg_env, dict):
+            server_env.update({str(k): str(v) for k, v in cfg_env.items()})
+
+        cfg_cwd = cfg.get("cwd")
+        cwd_value: Optional[str] = None
+        if isinstance(cfg_cwd, str) and cfg_cwd:
+            if not Path(cfg_cwd).is_dir():
+                raise ValueError(f"cwd does not exist: {cfg_cwd}")
+            cwd_value = cfg_cwd
+
+        params = StdioServerParameters(
+            command=command,
+            args=[str(a) for a in (cfg.get("args") or [])],
+            env=server_env,
+            cwd=cwd_value,
+        )
+
+        # stdio_client forwards `errlog` straight to asyncio.create_subprocess_exec
+        # as its `stderr=` argument, which needs a real OS file descriptor.
+        # Use a rewindable temp file so we can read captured stderr after the
+        # subprocess exits.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+            try:
+                async with stdio_client(params, errlog=stderr_file) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        resp = await session.list_tools()
+                        return [t.name for t in resp.tools]
+            except BaseException as exc:
+                inner = exc
+                while True:
+                    sub_excs = getattr(inner, "exceptions", None)
+                    if sub_excs:
+                        inner = sub_excs[0]
+                        continue
+                    cause = getattr(inner, "__cause__", None) or getattr(
+                        inner, "__context__", None
+                    )
+                    if cause is not None and cause is not inner:
+                        inner = cause
+                        continue
+                    break
+                try:
+                    stderr_file.seek(0)
+                    stderr_text = stderr_file.read().strip()
+                except OSError:
+                    stderr_text = ""
+                if stderr_text:
+                    lines = [ln for ln in stderr_text.splitlines() if ln.strip()]
+                    picked = next(
+                        (
+                            ln
+                            for ln in reversed(lines)
+                            if "Error" in ln or "error" in ln
+                        ),
+                        lines[-1] if lines else "",
+                    )
+                    raise RuntimeError(
+                        f"{type(inner).__name__}: {picked}"
+                    ) from inner
+                raise RuntimeError(f"{type(inner).__name__}: {inner}") from inner
 
     def _load_mcp_config(self, config_path: Path) -> Dict[str, Any]:
         """Load MCP server configuration from a JSON file.
@@ -938,3 +1349,103 @@ Both mechanisms are used for reliability.
                 "Failed to load MCP config", path=str(config_path), error=str(e)
             )
             return {}
+
+    def _load_project_mcps(
+        self, working_directory: Path, exclude_names: set
+    ) -> Dict[str, Any]:
+        """Discover MCP servers declared inside the user's selected folder.
+
+        Reads Claude Code's native project MCP locations:
+        - {working_directory}/.mcp.json
+        - {working_directory}/.claude/settings.json (mcpServers block)
+
+        Keys present in `exclude_names` are skipped so bot-owned names remain
+        authoritative and stale copies in the project's settings.json cannot
+        shadow the current bot configuration.
+
+        Entries with an unreachable `cwd` or a script path that clearly cannot
+        be launched on this host (e.g. Windows drive letters copied into a
+        Linux container) are dropped — a single broken subprocess otherwise
+        cascades and prevents the remaining MCP servers from being usable.
+        """
+        import json
+
+        discovered: Dict[str, Any] = {}
+        candidates = [
+            working_directory / ".mcp.json",
+            working_directory / ".claude" / "settings.json",
+        ]
+
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(
+                    "Failed to read project MCP file",
+                    path=str(path),
+                    error=str(e),
+                )
+                continue
+            servers = data.get("mcpServers") or {}
+            for name, cfg in servers.items():
+                if name in exclude_names or name in discovered:
+                    continue
+                skip_reason = self._mcp_config_skip_reason(cfg)
+                if skip_reason:
+                    logger.warning(
+                        "Skipping invalid project MCP entry",
+                        server=name,
+                        source=str(path),
+                        reason=skip_reason,
+                    )
+                    continue
+                discovered[name] = cfg
+
+        if discovered:
+            logger.info(
+                "Loaded project-local MCPs",
+                working_directory=str(working_directory),
+                servers=list(discovered.keys()),
+            )
+
+        return discovered
+
+    @staticmethod
+    def _mcp_config_skip_reason(cfg: Any) -> Optional[str]:
+        """Return a human-readable reason to skip an MCP entry, or None.
+
+        Only validates stdio-transport configs that launch a local process.
+        Anything with an explicit non-stdio `type`/`transport` is assumed
+        valid — we can't check remote endpoints from here.
+        """
+        if not isinstance(cfg, dict):
+            return "entry is not a JSON object"
+
+        transport = cfg.get("type") or cfg.get("transport")
+        if transport and transport not in ("stdio", None):
+            return None
+
+        command = cfg.get("command")
+        if not isinstance(command, str) or not command:
+            return "missing or invalid command"
+
+        # Windows drive letters in a Linux container are a common footgun
+        def _looks_like_windows_path(val: str) -> bool:
+            return len(val) >= 3 and val[1:3] == ":\\" and val[0].isalpha()
+
+        cwd = cfg.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            if _looks_like_windows_path(cwd):
+                return f"cwd uses a Windows path ({cwd!r}) unavailable here"
+            if not Path(cwd).is_dir():
+                return f"cwd does not exist: {cwd!r}"
+
+        args = cfg.get("args") or []
+        if isinstance(args, list):
+            for arg in args:
+                if isinstance(arg, str) and _looks_like_windows_path(arg):
+                    return f"arg uses a Windows path ({arg!r}) unavailable here"
+
+        return None
