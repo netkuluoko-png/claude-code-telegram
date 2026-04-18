@@ -7,7 +7,7 @@
 # is empty (first deploy / fresh volume).
 
 # Fix volume permissions (Railway volumes mount as root)
-mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/project
+mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/.claude/projects /app/data/project
 chown -R claude:claude /app/data
 
 # Seed /app/data/project from the image's tarball the first time the volume
@@ -35,6 +35,24 @@ CREDS_LIVE=/home/claude/.claude/.credentials.json
 SEED_HASH_FILE=/app/data/.claude/.seed_hash
 
 mkdir -p /home/claude/.claude
+
+# Persist Claude CLI session transcripts across deploys.
+# Claude CLI writes ~/.claude/projects/<sanitized-cwd>/<session-id>.jsonl;
+# without this symlink the transcripts live on the ephemeral container fs,
+# so every redeploy wipes them and /resume finds session_id in bot.db but
+# Claude itself can't restore the conversation → silent fresh session.
+# Migrate any transcripts that the previous (non-symlinked) container left
+# behind, then replace the directory with a symlink to the volume.
+if [ -d /home/claude/.claude/projects ] && [ ! -L /home/claude/.claude/projects ]; then
+    if [ -n "$(ls -A /home/claude/.claude/projects 2>/dev/null)" ]; then
+        echo "Migrating existing ~/.claude/projects transcripts to volume"
+        cp -an /home/claude/.claude/projects/. /app/data/.claude/projects/ 2>/dev/null || true
+    fi
+    rm -rf /home/claude/.claude/projects
+fi
+ln -sfn /app/data/.claude/projects /home/claude/.claude/projects
+chown -h claude:claude /home/claude/.claude/projects
+chown -R claude:claude /app/data/.claude/projects
 
 # Reseed when CLAUDE_CREDENTIALS_B64 is set AND its hash differs from last seed.
 # This lets the operator force-replace bad credentials by rotating the env var,
