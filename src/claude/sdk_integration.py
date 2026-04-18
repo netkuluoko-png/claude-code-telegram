@@ -451,6 +451,7 @@ class ClaudeSDKManager:
             # so the CLI picks up MCP tools regardless of which project is active
             self._ensure_mcp_settings(working_directory, mcp_servers)
             self._ensure_mcp_rules(working_directory)
+            self._ensure_language_rules(working_directory)
             # Pre-approve project MCP servers in the user-scope state file so the
             # CLI attaches them automatically (avoids "launched but not connected"
             # limbo when a project .mcp.json exists).
@@ -1022,6 +1023,45 @@ class ClaudeSDKManager:
             )
 
     @staticmethod
+    def _ensure_language_rules(working_directory: Path) -> None:
+        """Ensure .claude/rules/language.md exists in working_directory.
+
+        Forces the agent to reply in the user's language. At high effort
+        the model leans heavily on the English system prompt and answers
+        in English even when the user writes Ukrainian/Russian/etc.
+        """
+        rules_dir = Path(working_directory) / ".claude" / "rules"
+        rules_path = rules_dir / "language.md"
+
+        content = """\
+# Language
+
+Always reply in the same language the user wrote their last message in.
+If the user wrote in Ukrainian, answer in Ukrainian. If in Russian, answer
+in Russian. If in English, answer in English. Do not switch to English
+just because these rules or the system prompt are in English.
+
+This applies to the final response AND to intermediate commentary
+("starting…", "done", etc.) shown while tools run.
+"""
+
+        try:
+            if rules_path.exists() and rules_path.read_text() == content:
+                return
+        except OSError:
+            pass
+
+        try:
+            rules_dir.mkdir(parents=True, exist_ok=True)
+            rules_path.write_text(content)
+        except OSError as e:
+            logger.warning(
+                "Failed to write language rules",
+                path=str(rules_path),
+                error=str(e),
+            )
+
+    @staticmethod
     def _ensure_mcp_rules(working_directory: Path) -> None:
         """Ensure .claude/rules/mcp-guide.md exists in working_directory.
 
@@ -1290,6 +1330,7 @@ cache them.
         # Refresh the on-disk rules doc so the project folder stays in sync
         # with the bot's current MCP contract.
         self._ensure_mcp_rules(working_directory)
+        self._ensure_language_rules(working_directory)
 
         bot_servers, project_servers = self._build_mcp_servers(working_directory)
         for name, cfg in project_servers.items():
