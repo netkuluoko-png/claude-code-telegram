@@ -137,7 +137,11 @@ class SessionManager:
             session_id=session_id,
         )
 
-        # Check for existing session
+        # Check for existing session. When session_id is explicitly provided
+        # (e.g. user picked it from /resume), bypass the expiry filter — an
+        # explicit resume request should honor the user's choice. The timeout
+        # only gates *auto-resume* (no session_id given), which is handled in
+        # ClaudeIntegration._find_resumable_session.
         if session_id and session_id in self.active_sessions:
             session = self.active_sessions[session_id]
             if session.user_id != user_id:
@@ -147,14 +151,14 @@ class SessionManager:
                     session_owner=session.user_id,
                     requesting_user=user_id,
                 )
-            elif not session.is_expired(self.config.session_timeout_hours):
+            else:
                 logger.debug("Using active session", session_id=session_id)
                 return session
 
         # Try to load from storage (filtered by user_id)
         if session_id:
             session = await self.storage.load_session(session_id, user_id)
-            if session and not session.is_expired(self.config.session_timeout_hours):
+            if session:
                 self.active_sessions[session_id] = session
                 logger.info("Loaded session from storage", session_id=session_id)
                 return session
