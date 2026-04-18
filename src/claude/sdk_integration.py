@@ -341,6 +341,7 @@ class ClaudeSDKManager:
         images: Optional[List[Dict[str, str]]] = None,
         model_override: Optional[str] = None,
         user_id: int = 0,
+        effort_override: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -391,6 +392,7 @@ class ClaudeSDKManager:
                 max_turns=self.config.claude_max_turns,
                 model=model_override or self.config.claude_model or None,
                 max_budget_usd=self.config.claude_max_cost_per_request,
+                effort=effort_override or self.config.claude_effort,
                 cwd=str(working_directory),
                 allowed_tools=sdk_allowed_tools,
                 disallowed_tools=sdk_disallowed_tools,
@@ -673,21 +675,29 @@ class ClaudeSDKManager:
                     previous_session_id=session_id,
                 )
 
-            # Use ResultMessage.result if available, fall back to message extraction
+            # Use ResultMessage.result if available, fall back to the LAST
+            # assistant message's text. Concatenating ALL assistant messages
+            # mixes intermediate preamble ("I'll start by reading…") with the
+            # final answer and produces confusing replies on long tasks.
             if result_content is not None:
                 content = str(result_content).strip()
             else:
-                content_parts = []
-                for msg in messages:
-                    if isinstance(msg, AssistantMessage):
-                        msg_content = getattr(msg, "content", [])
-                        if msg_content and isinstance(msg_content, list):
-                            for block in msg_content:
-                                if hasattr(block, "text"):
-                                    content_parts.append(block.text)
-                        elif msg_content:
-                            content_parts.append(str(msg_content))
-                content = "\n".join(content_parts).strip()
+                content = ""
+                for msg in reversed(messages):
+                    if not isinstance(msg, AssistantMessage):
+                        continue
+                    msg_content = getattr(msg, "content", [])
+                    text_parts: List[str] = []
+                    if msg_content and isinstance(msg_content, list):
+                        for block in msg_content:
+                            if isinstance(block, TextBlock):
+                                text_parts.append(block.text)
+                    elif msg_content:
+                        text_parts.append(str(msg_content))
+                    candidate = "\n".join(text_parts).strip()
+                    if candidate:
+                        content = candidate
+                        break
 
             if not content and tools_used:
                 tool_names = [

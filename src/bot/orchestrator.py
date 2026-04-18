@@ -340,6 +340,7 @@ class MessageOrchestrator:
             ("new", self.agentic_new),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
+            ("effort", self.agentic_effort),
             ("repo", self.agentic_repo),
             ("resume", self.agentic_resume),
             ("model", self.agentic_model),
@@ -517,6 +518,7 @@ class MessageOrchestrator:
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
+                BotCommand("effort", "Set reasoning effort (low/medium/high/max)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("resume", "Browse & resume previous sessions"),
                 BotCommand("model", "Select Claude AI model"),
@@ -772,6 +774,46 @@ class MessageOrchestrator:
     def _get_preferred_model(self, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
         """Get user's preferred model from user_data or fall back to config."""
         return context.user_data.get("preferred_model") or None
+
+    _EFFORT_LEVELS = ("low", "medium", "high", "max")
+
+    def _get_preferred_effort(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Return effective effort: per-user override or config default."""
+        user_override = context.user_data.get("effort")
+        if user_override in self._EFFORT_LEVELS:
+            return str(user_override)
+        return str(self.settings.claude_effort)
+
+    async def agentic_effort(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Set reasoning effort: /effort [low|medium|high|max]."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        if not args:
+            current = self._get_preferred_effort(context)
+            await update.message.reply_text(
+                f"Effort: <b>{escape_html(current)}</b>\n\n"
+                "Usage: <code>/effort low|medium|high|max</code>\n"
+                "  low    — fastest, shallow reasoning\n"
+                "  medium — balanced\n"
+                "  high   — deeper reasoning\n"
+                "  max    — maximum reasoning (default)",
+                parse_mode="HTML",
+            )
+            return
+
+        level = args[0].strip().lower()
+        if level not in self._EFFORT_LEVELS:
+            await update.message.reply_text(
+                "Please use: /effort low, /effort medium, /effort high, or /effort max"
+            )
+            return
+
+        context.user_data["effort"] = level
+        await update.message.reply_text(
+            f"Effort set to <b>{escape_html(level)}</b>",
+            parse_mode="HTML",
+        )
 
     async def agentic_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1400,6 +1442,7 @@ class MessageOrchestrator:
                 force_new=force_new,
                 interrupt_event=interrupt_event,
                 model_override=self._get_preferred_model(context),
+                effort_override=self._get_preferred_effort(context),
                 on_retry=_on_fresh_retry,
             )
 
@@ -1668,6 +1711,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 model_override=self._get_preferred_model(context),
+                effort_override=self._get_preferred_effort(context),
             )
 
             if force_new:
@@ -1879,6 +1923,7 @@ class MessageOrchestrator:
                 force_new=force_new,
                 images=images,
                 model_override=self._get_preferred_model(context),
+                effort_override=self._get_preferred_effort(context),
             )
         finally:
             heartbeat.cancel()

@@ -42,6 +42,7 @@ class ClaudeIntegration:
         interrupt_event: Optional["asyncio.Event"] = None,
         images: Optional[List[Dict[str, str]]] = None,
         model_override: Optional[str] = None,
+        effort_override: Optional[str] = None,
         on_retry: Optional[Callable[[str], Any]] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
@@ -94,6 +95,7 @@ class ClaudeIntegration:
                     interrupt_event=interrupt_event,
                     images=images,
                     model_override=model_override,
+                    effort_override=effort_override,
                     user_id=user_id,
                 )
             except ClaudeTimeoutError:
@@ -148,6 +150,7 @@ class ClaudeIntegration:
                         interrupt_event=interrupt_event,
                         images=images,
                         model_override=model_override,
+                        effort_override=effort_override,
                         user_id=user_id,
                     )
                 else:
@@ -195,6 +198,7 @@ class ClaudeIntegration:
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
         model_override: Optional[str] = None,
+        effort_override: Optional[str] = None,
         user_id: int = 0,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
@@ -206,6 +210,7 @@ class ClaudeIntegration:
             stream_callback=stream_callback,
             interrupt_event=interrupt_event,
             model_override=model_override,
+            effort_override=effort_override,
             images=images,
             user_id=user_id,
         )
