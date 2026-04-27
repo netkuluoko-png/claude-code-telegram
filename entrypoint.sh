@@ -7,7 +7,7 @@
 # is empty (first deploy / fresh volume).
 
 # Fix volume permissions (Railway volumes mount as root)
-mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/.claude/projects /app/data/project
+mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/.claude/projects /app/data/.codex /app/data/project
 chown -R claude:claude /app/data
 
 # Seed /app/data/project from the image's tarball the first time the volume
@@ -81,6 +81,20 @@ rm -f "$CREDS_LIVE"
 ln -s "$CREDS_PERSISTENT" "$CREDS_LIVE"
 chown -h claude:claude "$CREDS_LIVE"
 chown -R claude:claude /home/claude/.claude
+
+# Persist Codex auth/config/session state across deploys.
+# Codex CLI stores login state under ~/.codex by default; Railway containers are
+# ephemeral, so keep that directory on the mounted data volume.
+if [ -d /home/claude/.codex ] && [ ! -L /home/claude/.codex ]; then
+    if [ -n "$(ls -A /home/claude/.codex 2>/dev/null)" ]; then
+        echo "Migrating existing ~/.codex state to volume"
+        cp -an /home/claude/.codex/. /app/data/.codex/ 2>/dev/null || true
+    fi
+    rm -rf /home/claude/.codex
+fi
+ln -sfn /app/data/.codex /home/claude/.codex
+chown -h claude:claude /home/claude/.codex
+chown -R claude:claude /app/data/.codex
 
 # Merge MCP servers into .claude/settings.json for all project directories
 # Uses Python to MERGE into existing settings (preserving permissions, hooks, etc.)

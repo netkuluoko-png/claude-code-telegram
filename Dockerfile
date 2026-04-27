@@ -8,8 +8,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+# Install agent CLIs
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 WORKDIR /app
 
@@ -37,9 +37,9 @@ RUN useradd -m -s /bin/bash claude && \
     mkdir -p /app/data && \
     chown -R claude:claude /app
 
-# Allow `claude` user to run the Claude Code CLI update (and only that) as root,
+# Allow `claude` user to run CLI updates (and only those) as root,
 # so the bot's /update command can refresh the global npm package.
-RUN printf 'claude ALL=(root) NOPASSWD: /usr/bin/npm install -g @anthropic-ai/claude-code@latest\nclaude ALL=(root) NOPASSWD: /usr/bin/npm install -g @anthropic-ai/claude-code\n' \
+RUN printf 'claude ALL=(root) NOPASSWD: /usr/bin/npm install -g @anthropic-ai/claude-code@latest\nclaude ALL=(root) NOPASSWD: /usr/bin/npm install -g @anthropic-ai/claude-code\nclaude ALL=(root) NOPASSWD: /usr/bin/npm install -g @openai/codex@latest\nclaude ALL=(root) NOPASSWD: /usr/bin/npm install -g @openai/codex\n' \
         > /etc/sudoers.d/claude-npm-update && \
     chmod 0440 /etc/sudoers.d/claude-npm-update
 

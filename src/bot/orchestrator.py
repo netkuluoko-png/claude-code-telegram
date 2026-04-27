@@ -823,17 +823,18 @@ class MessageOrchestrator:
     async def agentic_update(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Update Claude Code CLI via npm. New sessions auto-use the new binary."""
-        if self._get_agent_backend(context) == "codex":
-            await update.message.reply_text(
-                "Codex backend is active. Update the Codex CLI in the runtime image "
-                "or with your deployment package manager."
-            )
-            return
+        """Update the active agent CLI via npm."""
+        backend = self._get_agent_backend(context)
+        package = (
+            "@openai/codex@latest"
+            if backend == "codex"
+            else "@anthropic-ai/claude-code@latest"
+        )
+        label = _AGENT_LABELS[backend]
 
-        old_version = await self._get_agent_cli_version("claude")
+        old_version = await self._get_agent_cli_version(backend)
         progress = await update.message.reply_text(
-            f"⬆️ Updating Claude Code...\nCurrent: <code>{escape_html(old_version)}</code>",
+            f"⬆️ Updating {label}...\nCurrent: <code>{escape_html(old_version)}</code>",
             parse_mode="HTML",
         )
 
@@ -844,7 +845,7 @@ class MessageOrchestrator:
                 "npm",
                 "install",
                 "-g",
-                "@anthropic-ai/claude-code@latest",
+                package,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -871,7 +872,7 @@ class MessageOrchestrator:
             )
             return
 
-        new_version = await self._get_agent_cli_version("claude")
+        new_version = await self._get_agent_cli_version(backend)
         changed = new_version != old_version
         arrow = " → " if changed else " = "
         status_emoji = "✅" if changed else "ℹ️"
@@ -881,13 +882,14 @@ class MessageOrchestrator:
             else "Already on the latest version."
         )
         await progress.edit_text(
-            f"{status_emoji} Claude Code updated.\n"
+            f"{status_emoji} {label} updated.\n"
             f"<code>{escape_html(old_version)}</code>{arrow}"
             f"<code>{escape_html(new_version)}</code>\n\n{note}",
             parse_mode="HTML",
         )
         logger.info(
-            "Claude CLI updated via /update",
+            "Agent CLI updated via /update",
+            backend=backend,
             user_id=update.effective_user.id,
             old=old_version,
             new=new_version,
