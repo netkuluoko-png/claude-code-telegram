@@ -1416,11 +1416,7 @@ class MessageOrchestrator:
     ) -> None:
         """Start OAuth re-auth flow. Sends authorize URL; next text msg is the code."""
         if self._get_agent_backend(context) == "codex":
-            await update.message.reply_text(
-                "Codex backend is active. Authenticate the runtime with "
-                "<code>codex login</code> or provide <code>OPENAI_API_KEY</code>.",
-                parse_mode="HTML",
-            )
+            await self._start_codex_login(update, context)
             return
 
         from .features.oauth_login import start_login
@@ -1506,6 +1502,102 @@ class MessageOrchestrator:
             path=str(path),
         )
         await update.message.reply_text("✅ Authorized. You can use the bot now.")
+
+    async def _start_codex_login(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Start Codex device auth and report completion back to Telegram."""
+        from .features.codex_login import (
+            collect_initial_output,
+            finish_device_login,
+            start_device_login,
+        )
+
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        login_key = f"codex_login:{user_id}"
+        logins = context.bot_data.setdefault("codex_login_processes", {})
+
+        existing = logins.get(login_key)
+        if existing and not existing.done:
+            output = existing.output_text() or "Login is already in progress."
+            await update.message.reply_text(
+                "Codex login is already running:\n\n"
+                f"<pre>{escape_html(output[-3000:])}</pre>",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+
+        progress = await update.message.reply_text("Starting Codex login...")
+        try:
+            login = await start_device_login(self.settings.codex_cli_path)
+            logins[login_key] = login
+            output = await collect_initial_output(login, timeout=12.0)
+        except FileNotFoundError:
+            await progress.edit_text(
+                "Codex CLI not found. Set CODEX_CLI_PATH or install codex in the runtime."
+            )
+            return
+        except Exception as e:
+            await progress.edit_text(
+                f"Failed to start Codex login: <code>{escape_html(str(e))}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        if login.done:
+            text = output or "Codex login exited before producing instructions."
+            if login.returncode == 0:
+                await progress.edit_text("✅ Codex authorized.")
+            else:
+                await progress.edit_text(
+                    "❌ Codex login failed:\n\n"
+                    f"<pre>{escape_html(text[-3000:])}</pre>",
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            return
+
+        if output:
+            await progress.edit_text(
+                "🔐 <b>Codex authorization</b>\n\n"
+                "Open the URL below, enter the code if prompted, and finish sign-in. "
+                "I'll notify you when the CLI confirms authorization.\n\n"
+                f"<pre>{escape_html(output[-3000:])}</pre>",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        else:
+            await progress.edit_text(
+                "Codex login started, but the CLI has not printed instructions yet. "
+                "Run <code>/login</code> again to see captured output.",
+                parse_mode="HTML",
+            )
+
+        async def _notify_when_done() -> None:
+            try:
+                rc = await finish_device_login(login)
+                text = login.output_text()
+                if rc == 0:
+                    await context.bot.send_message(
+                        chat_id=chat_id, text="✅ Codex authorized."
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            "❌ Codex login failed:\n\n"
+                            f"<pre>{escape_html(text[-3000:] or f'exit {rc}')}</pre>"
+                        ),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+            finally:
+                if logins.get(login_key) is login:
+                    logins.pop(login_key, None)
+
+        asyncio.create_task(_notify_when_done())
 
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
