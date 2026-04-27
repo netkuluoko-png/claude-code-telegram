@@ -62,7 +62,6 @@ class CodexCLIManager:
         effort_override: Optional[str] = None,
     ) -> CodexResponse:
         """Execute a Codex command via `codex exec`."""
-        del user_id
         start_time = asyncio.get_event_loop().time()
         working_directory = Path(working_directory).resolve()
         stderr_lines: List[str] = []
