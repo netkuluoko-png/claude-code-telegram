@@ -95,6 +95,7 @@ fi
 ln -sfn /app/data/.codex /home/claude/.codex
 chown -h claude:claude /home/claude/.codex
 chown -R claude:claude /app/data/.codex
+export CODEX_HOME="${CODEX_HOME:-/app/data/.codex}"
 
 # Merge MCP servers into .claude/settings.json for all project directories
 # Uses Python to MERGE into existing settings (preserving permissions, hooks, etc.)
@@ -198,4 +199,4 @@ else:
 '"
 
 # Run as claude user
-exec su claude -c "python -c 'from src.main import run; run()'"
+exec su claude -c "CODEX_HOME='${CODEX_HOME}' python -c 'from src.main import run; run()'"

@@ -28,6 +28,8 @@ class CodexLoginProcess:
 def build_codex_login_env() -> Dict[str, str]:
     """Build environment for Codex CLI login."""
     env = os.environ.copy()
+    if not env.get("CODEX_HOME") and Path("/app/data/.codex").exists():
+        env["CODEX_HOME"] = "/app/data/.codex"
     codex_home = env.get("CODEX_HOME")
     if codex_home:
         Path(codex_home).mkdir(parents=True, exist_ok=True)

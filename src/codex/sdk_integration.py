@@ -64,6 +64,7 @@ class CodexCLIManager:
         start_time = asyncio.get_event_loop().time()
         working_directory = Path(working_directory).resolve()
         stderr_lines: List[str] = []
+        stdout_lines: List[str] = []
         events: List[Dict[str, Any]] = []
         output_last_message = None
         interrupted = False
@@ -112,6 +113,7 @@ class CodexCLIManager:
                         continue
                     event = self._parse_json_line(line)
                     if event is None:
+                        stdout_lines.append(line)
                         continue
                     events.append(event)
                     if stream_callback:
@@ -165,7 +167,20 @@ class CodexCLIManager:
                 )
 
             if proc.returncode != 0 and not interrupted:
-                message = self._extract_error(events) or "\n".join(stderr_lines[-20:])
+                message = (
+                    self._extract_error(events)
+                    or "\n".join(stderr_lines[-20:])
+                    or "\n".join(stdout_lines[-20:])
+                    or "no error output"
+                )
+                logger.error(
+                    "Codex CLI process failed",
+                    exit_code=proc.returncode,
+                    error=message[-2000:],
+                    stderr_tail=stderr_lines[-5:],
+                    stdout_tail=stdout_lines[-5:],
+                    event_types=[e.get("type") for e in events[-10:]],
+                )
                 raise ClaudeProcessError(
                     f"Codex process error (exit {proc.returncode}): {message}"
                 )
@@ -244,6 +259,8 @@ class CodexCLIManager:
 
     def _build_env(self) -> Dict[str, str]:
         env = os.environ.copy()
+        if not env.get("CODEX_HOME") and Path("/app/data/.codex").exists():
+            env["CODEX_HOME"] = "/app/data/.codex"
         if self.config.openai_api_key_str:
             env.setdefault("OPENAI_API_KEY", self.config.openai_api_key_str)
         return env
