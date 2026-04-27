@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS scheduler_tasks (
     working_directory TEXT NOT NULL,
     target_chat_id INTEGER,
     created_by INTEGER NOT NULL DEFAULT 0,
+    agent_backend TEXT NOT NULL DEFAULT 'claude',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     window_start TEXT,
@@ -82,7 +83,18 @@ class SchedulerTaskStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connect() as conn:
             await conn.executescript(_ENSURE_SCHEMA)
+            await self._ensure_columns(conn)
             await conn.commit()
+
+    async def _ensure_columns(self, conn: aiosqlite.Connection) -> None:
+        cursor = await conn.execute("PRAGMA table_info(scheduler_tasks)")
+        rows = await cursor.fetchall()
+        columns = {row["name"] for row in rows}
+        if "agent_backend" not in columns:
+            await conn.execute(
+                "ALTER TABLE scheduler_tasks "
+                "ADD COLUMN agent_backend TEXT NOT NULL DEFAULT 'claude'"
+            )
 
     async def create(
         self,
@@ -98,6 +110,7 @@ class SchedulerTaskStore:
         working_directory: str,
         target_chat_id: Optional[int],
         created_by: int,
+        agent_backend: str = "claude",
         window_start: Optional[str] = None,
         window_end: Optional[str] = None,
         skip_probability: float = 0.0,
@@ -112,9 +125,10 @@ class SchedulerTaskStore:
                     run_at, interval_minutes, cron_expression, max_runs,
                     runs_count, status, next_run_at,
                     working_directory, target_chat_id, created_by,
+                    agent_backend,
                     created_at, updated_at,
                     window_start, window_end, skip_probability, timezone
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_name,
@@ -128,6 +142,7 @@ class SchedulerTaskStore:
                     working_directory,
                     target_chat_id,
                     created_by,
+                    agent_backend,
                     now,
                     now,
                     window_start,
@@ -142,9 +157,7 @@ class SchedulerTaskStore:
                 raise RuntimeError("INSERT produced no task_id")
             return await self._get_by_id(conn, task_id)
 
-    async def list(
-        self, status_filter: Optional[str] = None
-    ) -> List[TaskRecord]:
+    async def list(self, status_filter: Optional[str] = None) -> List[TaskRecord]:
         query = (
             "SELECT * FROM scheduler_tasks"
             " WHERE status = ?"
@@ -212,6 +225,7 @@ class SchedulerTaskStore:
             "status",
             "working_directory",
             "target_chat_id",
+            "agent_backend",
             "window_start",
             "window_end",
             "skip_probability",
@@ -324,9 +338,7 @@ class SchedulerTaskStore:
             )
             await conn.commit()
 
-    async def _get_by_id(
-        self, conn: aiosqlite.Connection, task_id: int
-    ) -> TaskRecord:
+    async def _get_by_id(self, conn: aiosqlite.Connection, task_id: int) -> TaskRecord:
         cursor = await conn.execute(
             "SELECT * FROM scheduler_tasks WHERE task_id = ?",
             (task_id,),

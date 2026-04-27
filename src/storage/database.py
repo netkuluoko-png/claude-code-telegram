@@ -355,6 +355,16 @@ class DatabaseManager:
                 ALTER TABLE scheduler_tasks ADD COLUMN timezone TEXT;
                 """,
             ),
+            (
+                7,
+                """
+                -- Remember which agent backend created each scheduled task.
+                -- The worker tries this backend first and falls back to the
+                -- other available backend if the preferred CLI is unavailable.
+                ALTER TABLE scheduler_tasks
+                    ADD COLUMN agent_backend TEXT NOT NULL DEFAULT 'claude';
+                """,
+            ),
         ]
 
     async def _init_pool(self):

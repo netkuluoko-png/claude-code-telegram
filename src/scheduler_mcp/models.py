@@ -43,6 +43,7 @@ class TaskRecord:
     window_end: Optional[str] = None
     skip_probability: float = 0.0
     timezone: Optional[str] = None
+    agent_backend: str = "claude"
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> "TaskRecord":
@@ -63,6 +64,7 @@ class TaskRecord:
             working_directory=row["working_directory"],
             target_chat_id=row.get("target_chat_id"),
             created_by=int(row.get("created_by") or 0),
+            agent_backend=row.get("agent_backend") or "claude",
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
             updated_at=_parse_dt(row.get("updated_at")) or datetime.now(UTC),
             window_start=row.get("window_start"),
@@ -150,9 +152,7 @@ def compute_random_daily_next_run(
     )
     already_fired_today = False
     if last_fired is not None:
-        already_fired_today = (
-            last_fired.astimezone(tz).date() == candidate_date
-        )
+        already_fired_today = last_fired.astimezone(tz).date() == candidate_date
     if already_fired_today or now_local >= today_close_local:
         candidate_date = candidate_date + timedelta(days=1)
 
@@ -229,9 +229,7 @@ def compute_initial_next_run(
         trigger = CronTrigger.from_crontab(cron_expression, timezone=UTC)
         nxt = trigger.get_next_fire_time(None, current)
         if nxt is None:
-            raise ValueError(
-                f"cron_expression '{cron_expression}' never fires"
-            )
+            raise ValueError(f"cron_expression '{cron_expression}' never fires")
         return nxt.astimezone(UTC)
 
     if schedule_type == "random_daily":

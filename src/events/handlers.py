@@ -5,7 +5,7 @@ NotificationHandler: subscribes to AgentResponseEvent and delivers to Telegram.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import structlog
 
@@ -30,11 +30,15 @@ class AgentHandler:
         claude_integration: ClaudeIntegration,
         default_working_directory: Path,
         default_user_id: int = 0,
+        agent_integrations: Optional[Dict[str, Any]] = None,
+        default_agent_backend: str = "claude",
     ) -> None:
         self.event_bus = event_bus
         self.claude = claude_integration
+        self.agent_integrations = agent_integrations or {"claude": claude_integration}
         self.default_working_directory = default_working_directory
         self.default_user_id = default_user_id
+        self.default_agent_backend = default_agent_backend
 
     def register(self) -> None:
         """Subscribe to events that need agent processing."""
@@ -99,13 +103,43 @@ class AgentHandler:
             )
 
         working_dir = event.working_directory or self.default_working_directory
+        user_id = event.user_id or self.default_user_id
+        backend_order = self._backend_order(event.agent_backend)
 
         try:
-            response = await self.claude.run_command(
-                prompt=prompt,
-                working_directory=working_dir,
-                user_id=self.default_user_id,
-            )
+            response = None
+            last_error: Optional[BaseException] = None
+            for backend in backend_order:
+                integration = self.agent_integrations.get(backend)
+                if integration is None:
+                    continue
+                try:
+                    logger.info(
+                        "Running scheduled event through agent backend",
+                        job_id=event.job_id,
+                        job_name=event.job_name,
+                        backend=backend,
+                        preferred_backend=event.agent_backend,
+                    )
+                    response = await integration.run_command(
+                        prompt=prompt,
+                        working_directory=working_dir,
+                        user_id=user_id,
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Scheduled agent backend failed",
+                        job_id=event.job_id,
+                        backend=backend,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+
+            if response is None:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("No agent backends are configured")
 
             if response.content:
                 for chat_id in event.target_chat_ids:
@@ -132,6 +166,21 @@ class AgentHandler:
                 job_id=event.job_id,
                 event_id=event.id,
             )
+
+    def _backend_order(self, preferred_backend: Optional[str]) -> List[str]:
+        preferred = (preferred_backend or self.default_agent_backend or "").lower()
+        order: List[str] = []
+        if preferred in self.agent_integrations:
+            order.append(preferred)
+        elif self.default_agent_backend in self.agent_integrations:
+            order.append(self.default_agent_backend)
+        for backend in ("codex", "claude"):
+            if backend in self.agent_integrations and backend not in order:
+                order.append(backend)
+        for backend in self.agent_integrations:
+            if backend not in order:
+                order.append(backend)
+        return order
 
     def _build_webhook_prompt(self, event: WebhookEvent) -> str:
         """Build a Claude prompt from a webhook event."""

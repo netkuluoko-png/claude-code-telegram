@@ -50,6 +50,11 @@ def _current_user_id() -> int:
     return int(os.environ.get("SCHEDULER_DEFAULT_USER_ID", "0") or "0")
 
 
+def _current_agent_backend() -> str:
+    backend = os.environ.get("ACTIVE_AGENT_BACKEND", "claude").strip().lower()
+    return backend if backend in {"claude", "codex"} else "claude"
+
+
 def _owned_by_current_user(record: TaskRecord) -> bool:
     user_id = _current_user_id()
     return user_id <= 0 or record.created_by == user_id
@@ -141,6 +146,7 @@ def _format_task_line(record: TaskRecord) -> str:
         f" — {schedule_descr}"
         f" | next_run={next_run}"
         f" | runs={runs}"
+        f" | backend={record.agent_backend}"
         f" | cwd={record.working_directory}{chat}"
     )
 
@@ -264,6 +270,7 @@ async def schedule_task(
         working_directory=work_dir,
         target_chat_id=effective_chat_id,
         created_by=created_by,
+        agent_backend=_current_agent_backend(),
         window_start=payload.window_start,
         window_end=payload.window_end,
         skip_probability=payload.skip_probability or 0.0,

@@ -51,9 +51,7 @@ class SchedulerTaskWorker:
             return
         await self.store.ensure_schema()
         self._stop_event.clear()
-        self._task = asyncio.create_task(
-            self._loop(), name="scheduler-task-worker"
-        )
+        self._task = asyncio.create_task(self._loop(), name="scheduler-task-worker")
         logger.info(
             "Scheduler task worker started",
             poll_interval_seconds=self.poll_interval_seconds,
@@ -119,6 +117,8 @@ class SchedulerTaskWorker:
             prompt=record.prompt,
             working_directory=working_dir,
             target_chat_ids=chat_ids,
+            user_id=record.created_by,
+            agent_backend=record.agent_backend,
         )
 
         publish_error: Optional[str] = None

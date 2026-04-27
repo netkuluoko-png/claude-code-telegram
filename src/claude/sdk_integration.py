@@ -444,6 +444,7 @@ class ClaudeSDKManager:
                 sched_env.setdefault("SCHEDULER_DEFAULT_USER_ID", str(user_id))
                 sched_env.setdefault("SCHEDULER_DEFAULT_CHAT_ID", str(user_id))
                 sched_env.setdefault("APPROVED_DIRECTORY", str(approved_directory))
+                sched_env.setdefault("ACTIVE_AGENT_BACKEND", "claude")
 
             if user_id and self.config.is_isolated_user(user_id):
                 if "process-manager" in mcp_servers:

@@ -179,6 +179,8 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     agent_handler = AgentHandler(
         event_bus=event_bus,
         claude_integration=agent_integration,
+        agent_integrations=agent_integrations,
+        default_agent_backend=config.agent_backend,
         default_working_directory=config.approved_directory,
         default_user_id=(
             config.effective_allowed_users[0] if config.effective_allowed_users else 0

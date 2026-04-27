@@ -509,6 +509,7 @@ class CodexCLIManager:
             sched_env = sched_cfg.setdefault("env", {})
             sched_env["SCHEDULER_DEFAULT_USER_ID"] = str(user_id)
             sched_env["SCHEDULER_DEFAULT_CHAT_ID"] = str(user_id)
+            sched_env["ACTIVE_AGENT_BACKEND"] = "codex"
             sched_env["APPROVED_DIRECTORY"] = str(
                 self.config.approved_directory_for_user(user_id)
             )

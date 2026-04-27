@@ -125,6 +125,81 @@ class TestAgentHandler:
         assert prompt.startswith("/daily-standup")
         assert "morning report" in prompt
 
+    async def test_scheduled_event_prefers_recorded_backend(
+        self, event_bus: EventBus, mock_claude: AsyncMock
+    ) -> None:
+        """Scheduled events use the backend stored on the task."""
+        codex = AsyncMock()
+        codex.run_command = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "Codex result"
+        codex.run_command.return_value = mock_response
+
+        handler = AgentHandler(
+            event_bus=event_bus,
+            claude_integration=mock_claude,
+            agent_integrations={"claude": mock_claude, "codex": codex},
+            default_working_directory=Path("/tmp/test"),
+            default_user_id=42,
+        )
+
+        event = ScheduledEvent(
+            job_name="daily",
+            prompt="Run task",
+            target_chat_ids=[100],
+            user_id=1594711146,
+            agent_backend="codex",
+        )
+
+        await handler.handle_scheduled(event)
+
+        codex.run_command.assert_called_once()
+        assert codex.run_command.call_args.kwargs["user_id"] == 1594711146
+        mock_claude.run_command.assert_not_called()
+
+    async def test_scheduled_event_falls_back_when_recorded_backend_fails(
+        self, event_bus: EventBus, mock_claude: AsyncMock
+    ) -> None:
+        """If the task's backend is unavailable, try the next configured CLI."""
+        codex = AsyncMock()
+        codex.run_command = AsyncMock(side_effect=RuntimeError("not logged in"))
+        mock_response = MagicMock()
+        mock_response.content = "Claude fallback"
+        mock_claude.run_command.return_value = mock_response
+
+        published: list = []
+        original_publish = event_bus.publish
+
+        async def capture_publish(event):  # type: ignore[no-untyped-def]
+            published.append(event)
+            await original_publish(event)
+
+        event_bus.publish = capture_publish  # type: ignore[assignment]
+
+        handler = AgentHandler(
+            event_bus=event_bus,
+            claude_integration=mock_claude,
+            agent_integrations={"claude": mock_claude, "codex": codex},
+            default_working_directory=Path("/tmp/test"),
+            default_user_id=42,
+        )
+
+        await handler.handle_scheduled(
+            ScheduledEvent(
+                job_name="daily",
+                prompt="Run task",
+                target_chat_ids=[100],
+                user_id=1594711146,
+                agent_backend="codex",
+            )
+        )
+
+        codex.run_command.assert_called_once()
+        mock_claude.run_command.assert_called_once()
+        assert mock_claude.run_command.call_args.kwargs["user_id"] == 1594711146
+        response_events = [e for e in published if isinstance(e, AgentResponseEvent)]
+        assert response_events[0].text == "Claude fallback"
+
     async def test_claude_error_does_not_propagate(
         self, event_bus: EventBus, mock_claude: AsyncMock, agent_handler: AgentHandler
     ) -> None:
