@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     codex_timeout_seconds: int = Field(
         DEFAULT_CLAUDE_TIMEOUT_SECONDS, description="Codex CLI timeout"
     )
+    codex_sandbox_mode: Literal[
+        "read-only", "workspace-write", "danger-full-access"
+    ] = Field(
+        "danger-full-access",
+        description="Codex sandbox mode for CLI command execution",
+    )
     codex_approval_policy: Literal["untrusted", "on-failure", "on-request", "never"] = (
         Field(
             "never",

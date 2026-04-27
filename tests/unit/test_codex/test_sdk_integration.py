@@ -38,6 +38,13 @@ def test_build_args_for_new_session(tmp_path):
     )
 
     assert args[:2] == ["/usr/local/bin/codex", "--ask-for-approval"]
+    approval_idx = args.index("--ask-for-approval")
+    assert args[approval_idx : approval_idx + 2] == ["--ask-for-approval", "never"]
+    sandbox_idx = args.index("--sandbox")
+    assert args[sandbox_idx : sandbox_idx + 2] == [
+        "--sandbox",
+        "danger-full-access",
+    ]
     assert "exec" in args
     assert "--json" in args
     assert "--skip-git-repo-check" in args

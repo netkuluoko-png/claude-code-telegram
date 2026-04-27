@@ -221,9 +221,7 @@ class CodexCLIManager:
         effort_override: Optional[str],
     ) -> List[str]:
         binary = self.config.codex_cli_path or "codex"
-        sandbox = (
-            "workspace-write" if self.config.sandbox_enabled else "danger-full-access"
-        )
+        sandbox = self.config.codex_sandbox_mode
         args = [
             binary,
             "--ask-for-approval",
