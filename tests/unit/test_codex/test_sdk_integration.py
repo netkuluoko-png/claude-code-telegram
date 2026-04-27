@@ -1,6 +1,7 @@
 """Test Codex CLI integration helpers."""
 
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from src.codex.sdk_integration import CodexCLIManager
 from src.config.settings import Settings
@@ -99,3 +100,47 @@ def test_error_extractor_handles_turn_failed():
         CodexCLIManager._extract_error(events)
         == "stream disconnected before completion"
     )
+
+
+def test_write_codex_mcp_toml_preserves_other_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[projects."/repo"]\n'
+        'trust_level = "trusted"\n\n'
+        "[mcp_servers.old]\n"
+        'command = "old"\n'
+    )
+
+    CodexCLIManager._write_codex_mcp_toml(
+        config_path,
+        {
+            "telegram": {
+                "command": "python",
+                "args": ["-m", "src.mcp.telegram_server"],
+                "cwd": "/app",
+                "env": {"PYTHONPATH": "/app"},
+            }
+        },
+    )
+
+    text = config_path.read_text()
+    assert '[projects."/repo"]' in text
+    assert "[mcp_servers.old]" in text
+    assert "[mcp_servers.telegram]" in text
+    assert 'command = "python"' in text
+    assert 'args = ["-m", "src.mcp.telegram_server"]' in text
+    assert "[mcp_servers.telegram.env]" in text
+    assert 'PYTHONPATH = "/app"' in text
+
+
+async def test_inspect_mcp_servers_delegates_to_shared_manager(tmp_path):
+    config = _settings(tmp_path)
+    manager = CodexCLIManager(config)
+
+    with patch.object(manager, "_ensure_codex_mcp_config") as ensure:
+        ensure.return_value = None
+        manager._mcp_manager.inspect_mcp_servers = AsyncMock(return_value=["ok"])
+        result = await manager.inspect_mcp_servers(tmp_path)
+
+    ensure.assert_called_once_with(tmp_path)
+    assert result == ["ok"]

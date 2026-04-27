@@ -6,6 +6,7 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -198,6 +199,11 @@ class MessageOrchestrator:
                 if not allowed:
                     return
 
+            if update.effective_user and "agent_backend" not in context.user_data:
+                persisted = self._load_persisted_agent_backend(update.effective_user.id)
+                if persisted:
+                    context.user_data["agent_backend"] = persisted
+
             self._activate_agent_backend(context)
 
             try:
@@ -215,6 +221,44 @@ class MessageOrchestrator:
             context.user_data.get("agent_backend") or self.settings.agent_backend
         ).lower()
         return backend if backend in _AGENT_LABELS else self.settings.agent_backend
+
+    def _agent_backend_state_path(self) -> Path:
+        """Return persistent path for per-user backend selection."""
+        db_path = self.settings.database_path
+        if db_path is not None:
+            return db_path.parent / "agent_backends.json"
+        return Path("data") / "agent_backends.json"
+
+    def _load_persisted_agent_backend(self, user_id: int) -> Optional[str]:
+        path = self._agent_backend_state_path()
+        try:
+            data = json.loads(path.read_text()) if path.exists() else {}
+        except (json.JSONDecodeError, OSError):
+            return None
+        backend = str(data.get(str(user_id)) or "").lower()
+        return backend if backend in _AGENT_LABELS else None
+
+    def _save_persisted_agent_backend(self, user_id: int, backend: str) -> None:
+        if backend not in _AGENT_LABELS:
+            return
+        path = self._agent_backend_state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = json.loads(path.read_text()) if path.exists() else {}
+            if not isinstance(data, dict):
+                data = {}
+            data[str(user_id)] = backend
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+            tmp.replace(path)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "Failed to persist agent backend",
+                path=str(path),
+                user_id=user_id,
+                backend=backend,
+                error=str(e),
+            )
 
     def _activate_agent_backend(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Expose the selected integration via compatibility bot_data keys."""
@@ -716,6 +760,8 @@ class MessageOrchestrator:
 
         self._persist_active_agent_session(context)
         context.user_data["agent_backend"] = backend
+        if update.effective_user:
+            self._save_persisted_agent_backend(update.effective_user.id, backend)
         self._activate_agent_backend(context)
         context.user_data["force_new_session"] = False
 

@@ -178,6 +178,21 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     assert "restart" in cmd_names
 
 
+def test_agent_backend_persisted_per_user(tmp_dir, deps):
+    """Last selected backend survives process restarts via data file."""
+    settings = create_test_config(
+        approved_directory=str(tmp_dir),
+        agentic_mode=True,
+        database_url=f"sqlite:///{tmp_dir / 'bot.db'}",
+    )
+    orchestrator = MessageOrchestrator(settings, deps)
+
+    orchestrator._save_persisted_agent_backend(123, "codex")
+
+    fresh = MessageOrchestrator(settings, deps)
+    assert fresh._load_persisted_agent_backend(123) == "codex"
+
+
 async def test_classic_bot_commands(classic_settings, deps):
     """Classic mode returns 14 bot commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)

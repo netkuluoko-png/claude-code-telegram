@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 import structlog
 
 from ..claude.exceptions import ClaudeProcessError, ClaudeTimeoutError
-from ..claude.sdk_integration import StreamUpdate
+from ..claude.sdk_integration import ClaudeSDKManager, StreamUpdate
 from ..config.settings import Settings
 
 logger = structlog.get_logger()
@@ -45,6 +46,7 @@ class CodexCLIManager:
 
     def __init__(self, config: Settings):
         self.config = config
+        self._mcp_manager = ClaudeSDKManager(config)
 
     async def execute_command(
         self,
@@ -89,6 +91,8 @@ class CodexCLIManager:
                 session_id=session_id,
                 continue_session=continue_session,
             )
+
+            await self._ensure_codex_mcp_config(working_directory)
 
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -389,6 +393,80 @@ class CodexCLIManager:
     async def inspect_mcp_servers(
         self, working_directory: Path
     ) -> List[Dict[str, Any]]:
-        """MCP inspection placeholder for API parity with ClaudeIntegration."""
-        del working_directory
-        return []
+        """Enumerate the same MCP servers Codex receives."""
+        await self._ensure_codex_mcp_config(working_directory)
+        return await self._mcp_manager.inspect_mcp_servers(working_directory)
+
+    async def _ensure_codex_mcp_config(self, working_directory: Path) -> None:
+        """Write the shared MCP server list into Codex config.toml."""
+        bot_servers, project_servers = self._mcp_manager._build_mcp_servers(
+            working_directory
+        )
+        for name, cfg in project_servers.items():
+            await self._mcp_manager._ensure_mcp_deps(name, cfg)
+
+        mcp_servers: Dict[str, Any] = {}
+        mcp_servers.update(project_servers)
+        mcp_servers.update(bot_servers)
+        if not mcp_servers:
+            return
+
+        codex_home = Path(self._build_env().get("CODEX_HOME") or Path.home() / ".codex")
+        config_path = codex_home / "config.toml"
+        try:
+            codex_home.mkdir(parents=True, exist_ok=True)
+            self._write_codex_mcp_toml(config_path, mcp_servers)
+        except OSError as e:
+            logger.warning(
+                "Failed to write Codex MCP config",
+                path=str(config_path),
+                error=str(e),
+            )
+
+    @staticmethod
+    def _write_codex_mcp_toml(config_path: Path, mcp_servers: Dict[str, Any]) -> None:
+        existing = ""
+        if config_path.exists():
+            try:
+                existing = config_path.read_text()
+            except OSError:
+                existing = ""
+
+        cleaned = existing
+        for name in mcp_servers:
+            escaped = re.escape(name)
+            cleaned = re.sub(
+                rf"(?ms)^\[mcp_servers\.{escaped}\]\n.*?(?=^\[|\Z)",
+                "",
+                cleaned,
+            )
+            cleaned = re.sub(
+                rf"(?ms)^\[mcp_servers\.{escaped}\.env\]\n.*?(?=^\[|\Z)",
+                "",
+                cleaned,
+            )
+        cleaned = cleaned.rstrip()
+
+        generated = ["", "# Bot-generated shared MCP servers for Codex."]
+        for name, cfg in sorted(mcp_servers.items()):
+            command = cfg.get("command")
+            if not isinstance(command, str) or not command:
+                continue
+            args = [str(a) for a in (cfg.get("args") or [])]
+            env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+            cwd = cfg.get("cwd")
+
+            generated.append(f"[mcp_servers.{name}]")
+            generated.append(f"command = {json.dumps(command)}")
+            generated.append(f"args = {json.dumps(args)}")
+            if isinstance(cwd, str) and cwd:
+                generated.append(f"cwd = {json.dumps(cwd)}")
+            if env:
+                generated.append("")
+                generated.append(f"[mcp_servers.{name}.env]")
+                for key, value in sorted(env.items()):
+                    generated.append(f"{key} = {json.dumps(str(value))}")
+            generated.append("")
+
+        content = (cleaned + "\n" if cleaned else "") + "\n".join(generated).lstrip()
+        config_path.write_text(content.rstrip() + "\n")
