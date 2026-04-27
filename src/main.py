@@ -17,6 +17,7 @@ from src.claude import (
     SessionManager,
 )
 from src.claude.sdk_integration import ClaudeSDKManager
+from src.codex import CodexCLIManager, CodexIntegration
 from src.config.features import FeatureFlags
 from src.config.settings import Settings
 from src.events.bus import EventBus
@@ -141,15 +142,27 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     session_storage = SQLiteSessionStorage(storage.db_manager)
     session_manager = SessionManager(config, session_storage)
 
-    # Create Claude SDK manager and integration facade
-    logger.info("Using Claude Python SDK integration")
-    sdk_manager = ClaudeSDKManager(config, security_validator=security_validator)
-
+    # Create both integrations so Telegram users can switch backends at runtime.
+    logger.info("Creating Claude Python SDK integration")
+    claude_sdk_manager = ClaudeSDKManager(config, security_validator=security_validator)
     claude_integration = ClaudeIntegration(
         config=config,
-        sdk_manager=sdk_manager,
+        sdk_manager=claude_sdk_manager,
         session_manager=session_manager,
     )
+
+    logger.info("Creating Codex CLI integration")
+    codex_integration = CodexIntegration(
+        config=config,
+        sdk_manager=CodexCLIManager(config),
+        session_manager=session_manager,
+    )
+
+    agent_integrations = {
+        "claude": claude_integration,
+        "codex": codex_integration,
+    }
+    agent_integration = agent_integrations[config.agent_backend]
 
     # --- Event bus and agentic platform components ---
     event_bus = EventBus()
@@ -165,7 +178,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     # Agent handler — translates events into Claude executions
     agent_handler = AgentHandler(
         event_bus=event_bus,
-        claude_integration=claude_integration,
+        claude_integration=agent_integration,
         default_working_directory=config.approved_directory,
         default_user_id=config.allowed_users[0] if config.allowed_users else 0,
     )
@@ -177,7 +190,9 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "security_validator": security_validator,
         "rate_limiter": rate_limiter,
         "audit_logger": audit_logger,
-        "claude_integration": claude_integration,
+        "claude_integration": agent_integration,
+        "agent_integration": agent_integration,
+        "agent_integrations": agent_integrations,
         "storage": storage,
         "event_bus": event_bus,
         "project_registry": None,
@@ -194,7 +209,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
 
     return {
         "bot": bot,
-        "claude_integration": claude_integration,
+        "claude_integration": agent_integration,
         "storage": storage,
         "config": config,
         "features": features,

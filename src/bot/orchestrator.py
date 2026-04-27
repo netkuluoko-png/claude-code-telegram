@@ -121,14 +121,35 @@ def _tool_icon(name: str) -> str:
 # Available Claude models for /model command
 # 1M context models first (primary), then standard context
 _AVAILABLE_MODELS: List[Dict[str, str]] = [
-    {"id": "claude-opus-4-7[1m]", "label": "Opus 4.7 (1M)", "desc": "Newest & smartest, 1M context"},
+    {
+        "id": "claude-opus-4-7[1m]",
+        "label": "Opus 4.7 (1M)",
+        "desc": "Newest & smartest, 1M context",
+    },
     {"id": "claude-opus-4-7", "label": "Opus 4.7", "desc": "Newest & smartest"},
-    {"id": "claude-sonnet-4-6[1m]", "label": "Sonnet 4.6 (1M)", "desc": "Fast & capable, 1M context"},
-    {"id": "claude-opus-4-6[1m]", "label": "Opus 4.6 (1M)", "desc": "Intelligent, 1M context"},
+    {
+        "id": "claude-sonnet-4-6[1m]",
+        "label": "Sonnet 4.6 (1M)",
+        "desc": "Fast & capable, 1M context",
+    },
+    {
+        "id": "claude-opus-4-6[1m]",
+        "label": "Opus 4.6 (1M)",
+        "desc": "Intelligent, 1M context",
+    },
     {"id": "claude-sonnet-4-6", "label": "Sonnet 4.6", "desc": "Fast & capable"},
     {"id": "claude-opus-4-6", "label": "Opus 4.6", "desc": "Intelligent"},
-    {"id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5", "desc": "Fastest & cheapest"},
+    {
+        "id": "claude-haiku-4-5-20251001",
+        "label": "Haiku 4.5",
+        "desc": "Fastest & cheapest",
+    },
 ]
+
+_AGENT_LABELS = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+}
 
 
 @dataclass
@@ -177,13 +198,52 @@ class MessageOrchestrator:
                 if not allowed:
                     return
 
+            self._activate_agent_backend(context)
+
             try:
                 await handler(update, context)
             finally:
+                self._persist_active_agent_session(context)
                 if should_enforce:
                     self._persist_thread_state(context)
 
         return wrapped
+
+    def _get_agent_backend(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Return the user's active agent backend."""
+        backend = str(
+            context.user_data.get("agent_backend") or self.settings.agent_backend
+        ).lower()
+        return backend if backend in _AGENT_LABELS else self.settings.agent_backend
+
+    def _activate_agent_backend(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Expose the selected integration via compatibility bot_data keys."""
+        backend = self._get_agent_backend(context)
+        previous = context.user_data.get("_active_agent_backend")
+        current_session_id = context.user_data.get("claude_session_id")
+        agent_sessions = context.user_data.setdefault("agent_session_ids", {})
+
+        if previous and previous != backend:
+            agent_sessions[previous] = current_session_id
+        elif previous == backend and current_session_id is not None:
+            agent_sessions[backend] = current_session_id
+
+        context.user_data["_active_agent_backend"] = backend
+        context.user_data["claude_session_id"] = agent_sessions.get(backend)
+
+        integrations = context.bot_data.get("agent_integrations") or {}
+        integration = integrations.get(backend) or context.bot_data.get(
+            "claude_integration"
+        )
+        context.bot_data["claude_integration"] = integration
+        context.bot_data["agent_integration"] = integration
+        context.bot_data["agent_backend"] = backend
+
+    def _persist_active_agent_session(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Persist the compatibility session key under the active backend."""
+        backend = self._get_agent_backend(context)
+        agent_sessions = context.user_data.setdefault("agent_session_ids", {})
+        agent_sessions[backend] = context.user_data.get("claude_session_id")
 
     async def _apply_thread_routing_context(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -247,7 +307,20 @@ class MessageOrchestrator:
             current_dir = project_root
 
         context.user_data["current_directory"] = current_dir
-        context.user_data["claude_session_id"] = state.get("claude_session_id")
+        context.user_data["agent_backend"] = state.get(
+            "agent_backend", self.settings.agent_backend
+        )
+        context.user_data["agent_session_ids"] = state.get("agent_session_ids", {})
+        restored_session_id = context.user_data["agent_session_ids"].get(
+            context.user_data["agent_backend"]
+        )
+        if restored_session_id is None:
+            restored_session_id = state.get("claude_session_id")
+            if restored_session_id:
+                context.user_data["agent_session_ids"][
+                    context.user_data["agent_backend"]
+                ] = restored_session_id
+        context.user_data["claude_session_id"] = restored_session_id
         context.user_data["_thread_context"] = {
             "chat_id": chat.id,
             "message_thread_id": message_thread_id,
@@ -276,6 +349,8 @@ class MessageOrchestrator:
         thread_states[thread_context["state_key"]] = {
             "current_directory": str(current_dir),
             "claude_session_id": context.user_data.get("claude_session_id"),
+            "agent_backend": self._get_agent_backend(context),
+            "agent_session_ids": context.user_data.get("agent_session_ids", {}),
             "project_slug": thread_context["project_slug"],
         }
 
@@ -341,6 +416,9 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("effort", self.agentic_effort),
+            ("backend", self.agentic_backend),
+            ("claude", self.agentic_claude),
+            ("codex", self.agentic_codex),
             ("repo", self.agentic_repo),
             ("resume", self.agentic_resume),
             ("model", self.agentic_model),
@@ -519,6 +597,9 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("effort", "Set reasoning effort (low/medium/high/max)"),
+                BotCommand("backend", "Show or switch agent backend"),
+                BotCommand("claude", "Switch to Claude Code"),
+                BotCommand("codex", "Switch to Codex"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("resume", "Browse & resume previous sessions"),
                 BotCommand("model", "Select Claude AI model"),
@@ -613,16 +694,90 @@ class MessageOrchestrator:
     ) -> None:
         """Reset session, one-line confirmation."""
         context.user_data["claude_session_id"] = None
+        self._persist_active_agent_session(context)
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
 
         await update.message.reply_text("Session reset. What's next?")
 
-    async def _get_claude_cli_version(self) -> str:
-        """Return `claude --version` output, or 'unknown' on error."""
+    async def _switch_agent_backend(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        backend: str,
+    ) -> None:
+        """Switch the current user/thread to a different agent backend."""
+        if backend not in _AGENT_LABELS:
+            await update.message.reply_text(
+                "Use <code>/backend claude</code> or <code>/backend codex</code>.",
+                parse_mode="HTML",
+            )
+            return
+
+        self._persist_active_agent_session(context)
+        context.user_data["agent_backend"] = backend
+        self._activate_agent_backend(context)
+        context.user_data["force_new_session"] = False
+
+        label = _AGENT_LABELS[backend]
+        session_id = context.user_data.get("claude_session_id")
+        session_line = "active session restored" if session_id else "no active session"
+        await update.message.reply_text(
+            f"Backend switched to <b>{escape_html(label)}</b> ({session_line}).",
+            parse_mode="HTML",
+        )
+
+    async def agentic_backend(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show or switch active agent backend."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        if args:
+            await self._switch_agent_backend(update, context, args[0].strip().lower())
+            return
+
+        backend = self._get_agent_backend(context)
+        session_ids = context.user_data.get("agent_session_ids", {})
+        lines = [
+            f"Current backend: <b>{escape_html(_AGENT_LABELS[backend])}</b>",
+            "",
+            "Commands:",
+            "<code>/claude</code> - switch to Claude Code",
+            "<code>/codex</code> - switch to Codex",
+            "<code>/backend claude|codex</code>",
+            "",
+            "Sessions:",
+        ]
+        for key in ("claude", "codex"):
+            sid = session_ids.get(key)
+            status = "active" if sid else "none"
+            marker = " *" if key == backend else ""
+            lines.append(f"{_AGENT_LABELS[key]}: {status}{marker}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def agentic_claude(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Switch to Claude Code."""
+        await self._switch_agent_backend(update, context, "claude")
+
+    async def agentic_codex(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Switch to Codex."""
+        await self._switch_agent_backend(update, context, "codex")
+
+    async def _get_agent_cli_version(self, backend: str) -> str:
+        """Return active agent CLI version output, or 'unknown' on error."""
+        binary = (
+            (self.settings.codex_cli_path or "codex")
+            if backend == "codex"
+            else (self.settings.claude_cli_path or "claude")
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
-                "claude",
+                binary,
                 "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -656,10 +811,12 @@ class MessageOrchestrator:
             except Exception:
                 pass
 
-        cli_version = await self._get_claude_cli_version()
+        backend = self._get_agent_backend(context)
+        cli_version = await self._get_agent_cli_version(backend)
+        agent_label = _AGENT_LABELS[backend]
         await update.message.reply_text(
             f"📂 {dir_display} · Session: {session_status}{cost_str}\n"
-            f"🧩 Claude Code: <code>{escape_html(cli_version)}</code>",
+            f"🧩 {agent_label}: <code>{escape_html(cli_version)}</code>",
             parse_mode="HTML",
         )
 
@@ -667,7 +824,14 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Update Claude Code CLI via npm. New sessions auto-use the new binary."""
-        old_version = await self._get_claude_cli_version()
+        if self._get_agent_backend(context) == "codex":
+            await update.message.reply_text(
+                "Codex backend is active. Update the Codex CLI in the runtime image "
+                "or with your deployment package manager."
+            )
+            return
+
+        old_version = await self._get_agent_cli_version("claude")
         progress = await update.message.reply_text(
             f"⬆️ Updating Claude Code...\nCurrent: <code>{escape_html(old_version)}</code>",
             parse_mode="HTML",
@@ -707,7 +871,7 @@ class MessageOrchestrator:
             )
             return
 
-        new_version = await self._get_claude_cli_version()
+        new_version = await self._get_agent_cli_version("claude")
         changed = new_version != old_version
         arrow = " → " if changed else " = "
         status_emoji = "✅" if changed else "ℹ️"
@@ -775,13 +939,18 @@ class MessageOrchestrator:
         """Get user's preferred model from user_data or fall back to config."""
         return context.user_data.get("preferred_model") or None
 
-    _EFFORT_LEVELS = ("low", "medium", "high", "max")
+    _EFFORT_LEVELS = ("low", "medium", "high", "max", "xhigh")
 
     def _get_preferred_effort(self, context: ContextTypes.DEFAULT_TYPE) -> str:
         """Return effective effort: per-user override or config default."""
+        backend = self._get_agent_backend(context)
         user_override = context.user_data.get("effort")
         if user_override in self._EFFORT_LEVELS:
+            if backend == "codex" and user_override == "max":
+                return "xhigh"
             return str(user_override)
+        if backend == "codex":
+            return str(self.settings.codex_effort)
         return str(self.settings.claude_effort)
 
     async def agentic_effort(
@@ -793,11 +962,12 @@ class MessageOrchestrator:
             current = self._get_preferred_effort(context)
             await update.message.reply_text(
                 f"Effort: <b>{escape_html(current)}</b>\n\n"
-                "Usage: <code>/effort low|medium|high|max</code>\n"
+                "Usage: <code>/effort low|medium|high|max|xhigh</code>\n"
                 "  low    — fastest, shallow reasoning\n"
                 "  medium — balanced\n"
                 "  high   — deeper reasoning\n"
-                "  max    — maximum reasoning (default)",
+                "  max    — maximum Claude reasoning\n"
+                "  xhigh  — maximum Codex reasoning",
                 parse_mode="HTML",
             )
             return
@@ -805,7 +975,7 @@ class MessageOrchestrator:
         level = args[0].strip().lower()
         if level not in self._EFFORT_LEVELS:
             await update.message.reply_text(
-                "Please use: /effort low, /effort medium, /effort high, or /effort max"
+                "Please use: /effort low, /effort medium, /effort high, /effort max, or /effort xhigh"
             )
             return
 
@@ -819,6 +989,20 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show model selector: /model."""
+        if self._get_agent_backend(context) == "codex":
+            current = (
+                context.user_data.get("preferred_model")
+                or self.settings.codex_model
+                or "CLI default"
+            )
+            await update.message.reply_text(
+                f"Current Codex model: <b>{escape_html(current)}</b>\n\n"
+                "Set <code>CODEX_MODEL</code> in the environment for the default, "
+                "or pass a per-user override once a Codex model picker is configured.",
+                parse_mode="HTML",
+            )
+            return
+
         current = (
             context.user_data.get("preferred_model")
             or self.settings.claude_model
@@ -1231,6 +1415,14 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Start OAuth re-auth flow. Sends authorize URL; next text msg is the code."""
+        if self._get_agent_backend(context) == "codex":
+            await update.message.reply_text(
+                "Codex backend is active. Authenticate the runtime with "
+                "<code>codex login</code> or provide <code>OPENAI_API_KEY</code>.",
+                parse_mode="HTML",
+            )
+            return
+
         from .features.oauth_login import start_login
 
         pending = start_login()
@@ -1267,9 +1459,7 @@ class MessageOrchestrator:
         expected_state = pending.get("state")
         if not verifier or not expected_state:
             context.user_data.pop("oauth_pending", None)
-            await update.message.reply_text(
-                "No pending login. Run /login to start."
-            )
+            await update.message.reply_text("No pending login. Run /login to start.")
             return
 
         # 10 min timeout for the OAuth code
@@ -1291,16 +1481,16 @@ class MessageOrchestrator:
 
         if got_state and got_state != expected_state:
             context.user_data.pop("oauth_pending", None)
-            await update.message.reply_text(
-                "❌ State mismatch. Run /login again."
-            )
+            await update.message.reply_text("❌ State mismatch. Run /login again.")
             return
 
         try:
             token_resp = await exchange_code(code, verifier, expected_state)
             path = write_credentials(token_resp)
         except Exception as e:
-            logger.error("OAuth exchange failed", user_id=update.effective_user.id, error=str(e))
+            logger.error(
+                "OAuth exchange failed", user_id=update.effective_user.id, error=str(e)
+            )
             await update.message.reply_text(
                 f"❌ Token exchange failed: {escape_html(str(e))}\n\n"
                 "Run /login to try again.",
@@ -1315,9 +1505,7 @@ class MessageOrchestrator:
             user_id=update.effective_user.id,
             path=str(path),
         )
-        await update.message.reply_text(
-            "✅ Authorized. You can use the bot now."
-        )
+        await update.message.reply_text("✅ Authorized. You can use the bot now.")
 
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2217,6 +2405,7 @@ class MessageOrchestrator:
 
     def _get_pm(self) -> "ProcessManager":  # type: ignore[name-defined]
         from src.process.manager import ProcessManager
+
         return ProcessManager()
 
     async def process_dispatch(
@@ -2252,7 +2441,9 @@ class MessageOrchestrator:
                 parse_mode="HTML",
             )
 
-    async def _proc_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str) -> None:
+    async def _proc_run(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
         if not args:
             await update.message.reply_text("Usage: /process run <command>")
             return
@@ -2264,10 +2455,14 @@ class MessageOrchestrator:
             if len(parts) == 2:
                 name, command = parts
             else:
-                await update.message.reply_text("Usage: /process run -n <name> <command>")
+                await update.message.reply_text(
+                    "Usage: /process run -n <name> <command>"
+                )
                 return
 
-        cwd = str(context.user_data.get("current_directory", self.settings.approved_directory))
+        cwd = str(
+            context.user_data.get("current_directory", self.settings.approved_directory)
+        )
         pm = self._get_pm()
         try:
             entry = pm.start(command, cwd, name)
@@ -2301,12 +2496,20 @@ class MessageOrchestrator:
         keyboard = []
         for p in procs:
             if p.is_alive:
-                keyboard.append([
-                    InlineKeyboardButton(f"Logs #{p.id} {p.name}", callback_data=f"plogs:{p.id}"),
-                    InlineKeyboardButton(f"Kill #{p.id}", callback_data=f"pkill:{p.id}"),
-                ])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            f"Logs #{p.id} {p.name}", callback_data=f"plogs:{p.id}"
+                        ),
+                        InlineKeyboardButton(
+                            f"Kill #{p.id}", callback_data=f"pkill:{p.id}"
+                        ),
+                    ]
+                )
         markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=markup)
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=markup
+        )
 
     async def _proc_kill(self, update: Update, args: str) -> None:
         if not args or not args.strip().isdigit():
@@ -2315,7 +2518,10 @@ class MessageOrchestrator:
         pm = self._get_pm()
         entry = pm.kill(int(args.strip()))
         if entry:
-            await update.message.reply_text(f"\U0001f534 #{entry.id} '{escape_html(entry.name)}' killed", parse_mode="HTML")
+            await update.message.reply_text(
+                f"\U0001f534 #{entry.id} '{escape_html(entry.name)}' killed",
+                parse_mode="HTML",
+            )
         else:
             await update.message.reply_text(f"Process #{args.strip()} not found.")
 
@@ -2330,7 +2536,9 @@ class MessageOrchestrator:
             return
         logs = entry.last_logs(50)
         header = f"<b>#{entry.id} '{escape_html(entry.name)}'</b> [{entry.status}]\n\n"
-        await update.message.reply_text(header + f"<pre>{escape_html(logs[-3500:])}</pre>", parse_mode="HTML")
+        await update.message.reply_text(
+            header + f"<pre>{escape_html(logs[-3500:])}</pre>", parse_mode="HTML"
+        )
 
     # ── process callback handlers ────────────────────────────────────
 
@@ -2347,7 +2555,9 @@ class MessageOrchestrator:
             return
         logs = entry.last_logs(50)
         header = f"<b>#{proc_id} '{escape_html(entry.name)}'</b> [{entry.status}]\n\n"
-        await query.message.reply_text(header + f"<pre>{escape_html(logs[-3500:])}</pre>", parse_mode="HTML")
+        await query.message.reply_text(
+            header + f"<pre>{escape_html(logs[-3500:])}</pre>", parse_mode="HTML"
+        )
 
     async def _handle_pkill_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2358,7 +2568,10 @@ class MessageOrchestrator:
         entry = pm.kill(proc_id)
         if entry:
             await query.answer(f"#{proc_id} killed")
-            await query.edit_message_text(f"\U0001f534 #{proc_id} '{escape_html(entry.name)}' killed", parse_mode="HTML")
+            await query.edit_message_text(
+                f"\U0001f534 #{proc_id} '{escape_html(entry.name)}' killed",
+                parse_mode="HTML",
+            )
         else:
             await query.answer("Not found", show_alert=True)
 
@@ -2404,12 +2617,14 @@ class MessageOrchestrator:
 
         # Filter by project directory only — show all sessions regardless of age
         # so the user can resume any previous chat after restarts/deploys.
-        sessions = [
-            s for s in all_sessions if str(s.project_path) == str(current_dir)
-        ]
+        sessions = [s for s in all_sessions if str(s.project_path) == str(current_dir)]
 
         if not sessions:
-            rel = current_dir.name if current_dir != self.settings.approved_directory else str(current_dir)
+            rel = (
+                current_dir.name
+                if current_dir != self.settings.approved_directory
+                else str(current_dir)
+            )
             text = f"No sessions for <code>{escape_html(rel)}/</code>"
             if edit:
                 await target.edit_message_text(text, parse_mode="HTML")
@@ -2444,7 +2659,11 @@ class MessageOrchestrator:
         page = max(0, min(page, max_page))
         page_sessions = sessions[page * ps : (page + 1) * ps]
 
-        rel_dir = current_dir.name if current_dir != self.settings.approved_directory else str(current_dir)
+        rel_dir = (
+            current_dir.name
+            if current_dir != self.settings.approved_directory
+            else str(current_dir)
+        )
         lines = [
             f"<b>Sessions for</b> <code>{escape_html(rel_dir)}/</code>"
             f" ({total} total \u00b7 page {page + 1}/{max_page + 1})\n"
@@ -2471,7 +2690,11 @@ class MessageOrchestrator:
             if is_current:
                 btn_label = f"\u2705 {btn_label}"
             keyboard.append(
-                [InlineKeyboardButton(btn_label, callback_data=f"resume:{s.session_id}")]
+                [
+                    InlineKeyboardButton(
+                        btn_label, callback_data=f"resume:{s.session_id}"
+                    )
+                ]
             )
 
         # Pagination row
@@ -2508,7 +2731,9 @@ class MessageOrchestrator:
             await query.answer("Session manager not available", show_alert=True)
             return
 
-        session = await claude_integration.session_manager.storage.load_session(session_id, user_id)
+        session = await claude_integration.session_manager.storage.load_session(
+            session_id, user_id
+        )
         if not session:
             await query.answer("Session not found or expired", show_alert=True)
             return

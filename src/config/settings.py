@@ -68,6 +68,12 @@ class Settings(BaseSettings):
         description="Allow all Claude tools by bypassing tool validation checks",
     )
 
+    # Agent backend settings
+    agent_backend: Literal["claude", "codex"] = Field(
+        "claude",
+        description="Coding agent backend to use: 'claude' or 'codex'",
+    )
+
     # Claude settings
     claude_binary_path: Optional[str] = Field(
         None, description="Path to Claude CLI binary (deprecated)"
@@ -128,6 +134,27 @@ class Settings(BaseSettings):
     claude_disallowed_tools: Optional[List[str]] = Field(
         default=[],
         description="List of explicitly disallowed Claude tools/commands",
+    )
+
+    # Codex settings
+    codex_cli_path: Optional[str] = Field(
+        None, description="Path to Codex CLI executable"
+    )
+    codex_model: Optional[str] = Field(
+        None, description="Codex model to use (defaults to CLI/config default)"
+    )
+    codex_effort: Literal["low", "medium", "high", "xhigh"] = Field(
+        "medium",
+        description="Codex reasoning effort (low|medium|high|xhigh)",
+    )
+    codex_timeout_seconds: int = Field(
+        DEFAULT_CLAUDE_TIMEOUT_SECONDS, description="Codex CLI timeout"
+    )
+    codex_approval_policy: Literal["untrusted", "on-failure", "on-request", "never"] = (
+        Field(
+            "never",
+            description="Codex approval policy for CLI execution",
+        )
     )
 
     # Retry settings
