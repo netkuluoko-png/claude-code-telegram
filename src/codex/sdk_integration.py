@@ -267,6 +267,94 @@ class CodexCLIManager:
             env.setdefault("OPENAI_API_KEY", self.config.openai_api_key_str)
         return env
 
+    async def list_models(self) -> List[Dict[str, Any]]:
+        """Return the current Codex CLI model catalog in a compact shape."""
+        binary = self.config.codex_cli_path or "codex"
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            "debug",
+            "models",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._build_env(),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise ClaudeTimeoutError("Codex model catalog timed out after 15s")
+
+        if proc.returncode != 0:
+            error = (
+                stderr.decode(errors="replace").strip()
+                or stdout.decode(errors="replace").strip()
+            )
+            raise ClaudeProcessError(
+                f"Codex model catalog failed (exit {proc.returncode}): "
+                f"{error[-2000:] or 'no error output'}"
+            )
+
+        return self._parse_model_catalog(stdout.decode(errors="replace"))
+
+    @staticmethod
+    def _parse_model_catalog(raw: str) -> List[Dict[str, Any]]:
+        """Parse `codex debug models` without retaining large instruction blobs."""
+        data = json.loads(raw)
+        raw_models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(raw_models, list):
+            return []
+
+        models: List[Dict[str, Any]] = []
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+            slug = item.get("slug")
+            if not isinstance(slug, str) or not slug:
+                continue
+
+            visibility = item.get("visibility")
+            if isinstance(visibility, str) and visibility and visibility != "list":
+                continue
+
+            supported_efforts: List[str] = []
+            for level in item.get("supported_reasoning_levels") or []:
+                if isinstance(level, dict) and isinstance(level.get("effort"), str):
+                    supported_efforts.append(level["effort"])
+
+            priority = item.get("priority")
+            if not isinstance(priority, (int, float)):
+                priority = 1_000_000
+
+            label = item.get("display_name")
+            description = item.get("description")
+            default_effort = item.get("default_reasoning_level")
+            models.append(
+                {
+                    "id": slug,
+                    "label": label if isinstance(label, str) and label else slug,
+                    "desc": (
+                        description
+                        if isinstance(description, str) and description
+                        else ""
+                    ),
+                    "default_effort": (
+                        default_effort if isinstance(default_effort, str) else ""
+                    ),
+                    "supported_efforts": supported_efforts,
+                    "priority": priority,
+                }
+            )
+
+        return sorted(
+            models,
+            key=lambda model: (
+                model["priority"],
+                str(model["label"]).lower(),
+                str(model["id"]),
+            ),
+        )
+
     @staticmethod
     def _parse_json_line(line: str) -> Optional[Dict[str, Any]]:
         try:

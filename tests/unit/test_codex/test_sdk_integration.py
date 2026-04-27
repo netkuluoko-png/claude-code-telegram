@@ -102,6 +102,55 @@ def test_error_extractor_handles_turn_failed():
     )
 
 
+def test_parse_model_catalog_keeps_compact_listable_models():
+    raw = """
+    {
+      "models": [
+        {
+          "slug": "hidden-model",
+          "display_name": "Hidden",
+          "visibility": "hidden",
+          "priority": 1,
+          "base_instructions": "large prompt should not be retained"
+        },
+        {
+          "slug": "gpt-5.5",
+          "display_name": "GPT-5.5",
+          "description": "Frontier model",
+          "default_reasoning_level": "medium",
+          "supported_reasoning_levels": [
+            {"effort": "low"},
+            {"effort": "medium"},
+            {"effort": "xhigh"}
+          ],
+          "visibility": "list",
+          "priority": 2,
+          "base_instructions": "large prompt should not be retained"
+        },
+        {
+          "slug": "gpt-5.4-mini",
+          "display_name": "GPT-5.4-Mini",
+          "visibility": "list",
+          "priority": 1
+        }
+      ]
+    }
+    """
+
+    models = CodexCLIManager._parse_model_catalog(raw)
+
+    assert [model["id"] for model in models] == ["gpt-5.4-mini", "gpt-5.5"]
+    assert models[1] == {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5",
+        "desc": "Frontier model",
+        "default_effort": "medium",
+        "supported_efforts": ["low", "medium", "xhigh"],
+        "priority": 2,
+    }
+    assert "base_instructions" not in models[1]
+
+
 def test_write_codex_mcp_toml_preserves_other_config(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(

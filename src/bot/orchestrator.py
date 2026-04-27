@@ -646,7 +646,7 @@ class MessageOrchestrator:
                 BotCommand("codex", "Switch to Codex"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("resume", "Browse & resume previous sessions"),
-                BotCommand("model", "Select Claude AI model"),
+                BotCommand("model", "Select agent model"),
                 BotCommand("login", "Re-authorize Claude (OAuth)"),
                 BotCommand("update", "Update Claude Code CLI"),
                 BotCommand("process", "Manage processes: run/ps/kill/logs"),
@@ -984,8 +984,33 @@ class MessageOrchestrator:
         )
 
     def _get_preferred_model(self, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-        """Get user's preferred model from user_data or fall back to config."""
-        return context.user_data.get("preferred_model") or None
+        """Get user's preferred model for the active backend."""
+        backend = self._get_agent_backend(context)
+        models = context.user_data.get("preferred_models")
+        if isinstance(models, dict):
+            selected = models.get(backend)
+            if isinstance(selected, str) and selected:
+                return selected
+
+        legacy_model = context.user_data.get("preferred_model")
+        if backend == "claude" and isinstance(legacy_model, str) and legacy_model:
+            return legacy_model
+        return None
+
+    def _set_preferred_model(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        backend: str,
+        model_id: str,
+    ) -> None:
+        """Store a model override without crossing Claude/Codex backends."""
+        models = context.user_data.get("preferred_models")
+        if not isinstance(models, dict):
+            models = {}
+            context.user_data["preferred_models"] = models
+        models[backend] = model_id
+        if backend == "claude":
+            context.user_data["preferred_model"] = model_id
 
     _EFFORT_LEVELS = ("low", "medium", "high", "max", "xhigh")
 
@@ -1038,21 +1063,61 @@ class MessageOrchestrator:
     ) -> None:
         """Show model selector: /model."""
         if self._get_agent_backend(context) == "codex":
-            current = (
-                context.user_data.get("preferred_model")
-                or self.settings.codex_model
-                or "CLI default"
-            )
+            current = self._get_preferred_model(context) or self.settings.codex_model
+            current_display = current or "CLI default"
+            integration = context.bot_data.get("claude_integration")
+            if not integration or not hasattr(integration, "list_models"):
+                await update.message.reply_text(
+                    "Codex model catalog is not available for this backend."
+                )
+                return
+
+            try:
+                models = await integration.list_models()
+            except Exception as e:
+                logger.warning("Failed to load Codex model catalog", error=str(e))
+                await update.message.reply_text(
+                    "Could not load Codex models from the current CLI version:\n"
+                    f"<code>{escape_html(str(e))}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            if not models:
+                await update.message.reply_text(
+                    "Codex CLI did not return any selectable models."
+                )
+                return
+
+            context.user_data["codex_model_catalog"] = models
+            keyboard = []
+            for idx, model in enumerate(models):
+                check = " \u2705" if model["id"] == current else ""
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            f"{model['label']}{check}",
+                            callback_data=f"model:codex:{idx}",
+                        )
+                    ]
+                )
+
+            current_label = current_display
+            for model in models:
+                if model["id"] == current:
+                    current_label = str(model["label"])
+                    break
+
             await update.message.reply_text(
-                f"Current Codex model: <b>{escape_html(current)}</b>\n\n"
-                "Set <code>CODEX_MODEL</code> in the environment for the default, "
-                "or pass a per-user override once a Codex model picker is configured.",
+                f"Current Codex model: <b>{escape_html(current_label)}</b>\n\n"
+                "Select a Codex model from the current CLI catalog:",
                 parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
 
         current = (
-            context.user_data.get("preferred_model")
+            self._get_preferred_model(context)
             or self.settings.claude_model
             or "default"
         )
@@ -1087,7 +1152,58 @@ class MessageOrchestrator:
     ) -> None:
         """Handle model selection from inline keyboard."""
         query = update.callback_query
-        model_id = query.data.split(":", 1)[1]
+        data = query.data or ""
+
+        if data.startswith("model:codex:"):
+            raw_index = data.rsplit(":", 1)[1]
+            try:
+                index = int(raw_index)
+            except ValueError:
+                await query.answer("Unknown model", show_alert=True)
+                return
+
+            catalog = context.user_data.get("codex_model_catalog")
+            if not isinstance(catalog, list) or index < 0 or index >= len(catalog):
+                await query.answer(
+                    "Model list expired. Run /model again.", show_alert=True
+                )
+                return
+
+            selected = catalog[index]
+            if not isinstance(selected, dict) or not isinstance(
+                selected.get("id"), str
+            ):
+                await query.answer("Unknown model", show_alert=True)
+                return
+
+            model_id = selected["id"]
+            label = str(selected.get("label") or model_id)
+            self._set_preferred_model(context, "codex", model_id)
+            await query.answer()
+
+            keyboard = []
+            for idx, model in enumerate(catalog):
+                if not isinstance(model, dict):
+                    continue
+                check = " \u2705" if model.get("id") == model_id else ""
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            f"{model.get('label') or model.get('id')}{check}",
+                            callback_data=f"model:codex:{idx}",
+                        )
+                    ]
+                )
+
+            await query.edit_message_text(
+                f"Codex model set to <b>{escape_html(label)}</b>\n\n"
+                "All new Codex requests will use this model.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        model_id = data.split(":", 1)[1]
 
         # Validate model_id against known models
         valid_ids = {m["id"] for m in _AVAILABLE_MODELS}
@@ -1095,7 +1211,7 @@ class MessageOrchestrator:
             await query.answer("Unknown model", show_alert=True)
             return
 
-        context.user_data["preferred_model"] = model_id
+        self._set_preferred_model(context, "claude", model_id)
         await query.answer()
 
         # Find label for the selected model

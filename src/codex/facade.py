@@ -184,5 +184,8 @@ class CodexIntegration:
     ) -> List[Dict[str, Any]]:
         return await self.sdk_manager.inspect_mcp_servers(working_directory)
 
+    async def list_models(self) -> List[Dict[str, Any]]:
+        return await self.sdk_manager.list_models()
+
     async def shutdown(self) -> None:
         logger.info("Codex integration shutdown complete")
