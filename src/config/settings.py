@@ -10,7 +10,7 @@ Features:
 
 import json
 from pathlib import Path
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     approved_directory: Path = Field(..., description="Base directory for projects")
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
+    )
+    isolated_user_directories: Dict[int, Path] = Field(
+        default_factory=lambda: {
+            1594711146: Path("/app/data/isolated-users/1594711146")
+        },
+        description=(
+            "Telegram user ID to isolated workspace root. Accepts JSON or "
+            "comma-separated entries like 123:/path,456:/other."
+        ),
     )
     enable_token_auth: bool = Field(
         False, description="Enable token-based authentication"
@@ -386,6 +395,38 @@ class Settings(BaseSettings):
             return [int(uid) for uid in v]
         return v  # type: ignore[no-any-return]
 
+    @field_validator("isolated_user_directories", mode="before")
+    @classmethod
+    def parse_isolated_user_directories(cls, v: Any) -> Dict[int, Path]:
+        """Parse isolated user workspace mappings."""
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            return {int(uid): Path(path) for uid, path in v.items()}
+        if isinstance(v, str):
+            value = v.strip()
+            if not value:
+                return {}
+            if value.startswith("{"):
+                data = json.loads(value)
+                if not isinstance(data, dict):
+                    raise ValueError("isolated_user_directories JSON must be an object")
+                return {int(uid): Path(path) for uid, path in data.items()}
+
+            result: Dict[int, Path] = {}
+            for entry in value.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if ":" not in entry:
+                    raise ValueError(
+                        "isolated_user_directories entries must use user_id:/path"
+                    )
+                uid, path = entry.split(":", 1)
+                result[int(uid.strip())] = Path(path.strip())
+            return result
+        return v  # type: ignore[no-any-return]
+
     @field_validator("claude_allowed_tools", mode="before")
     @classmethod
     def parse_claude_allowed_tools(cls, v: Any) -> Optional[List[str]]:
@@ -411,6 +452,32 @@ class Settings(BaseSettings):
         if not path.is_dir():
             raise ValueError(f"Approved directory is not a directory: {path}")
         return path  # type: ignore[no-any-return]
+
+    @field_validator("isolated_user_directories")
+    @classmethod
+    def validate_isolated_user_directories(cls, v: Dict[int, Path]) -> Dict[int, Path]:
+        """Normalize isolated workspace paths."""
+        result: Dict[int, Path] = {}
+        for uid, path in v.items():
+            result[int(uid)] = Path(path).expanduser().resolve()
+        return result
+
+    @property
+    def effective_allowed_users(self) -> Optional[List[int]]:
+        """Whitelist users plus any users with isolated workspaces."""
+        users = list(self.allowed_users or [])
+        for uid in self.isolated_user_directories:
+            if uid not in users:
+                users.append(uid)
+        return users or None
+
+    def approved_directory_for_user(self, user_id: int) -> Path:
+        """Return the filesystem root this Telegram user is allowed to see."""
+        return self.isolated_user_directories.get(user_id, self.approved_directory)
+
+    def is_isolated_user(self, user_id: int) -> bool:
+        """Return whether this Telegram user has a dedicated workspace root."""
+        return user_id in self.isolated_user_directories
 
     @field_validator("mcp_config_path", mode="before")
     @classmethod

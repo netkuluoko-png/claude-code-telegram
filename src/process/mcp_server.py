@@ -1,5 +1,7 @@
 """MCP server exposing process management tools to Claude Code."""
 
+import os
+
 from fastmcp import FastMCP
 
 from src.process.manager import ProcessManager
@@ -9,7 +11,7 @@ pm = ProcessManager()
 
 
 @mcp.tool()
-def process_run(command: str, cwd: str = "/project", name: str = "") -> str:
+def process_run(command: str, cwd: str = "", name: str = "") -> str:
     """Start a background process that persists across sessions.
 
     Args:
@@ -17,6 +19,8 @@ def process_run(command: str, cwd: str = "/project", name: str = "") -> str:
         cwd: Working directory (default: /project)
         name: Human-readable name for the process
     """
+    if not cwd:
+        cwd = os.environ.get("PROCESS_APPROVED_DIRECTORY") or "/project"
     entry = pm.start(command, cwd, name)
     return (
         f"Process #{entry.id} '{entry.name}' started\n"

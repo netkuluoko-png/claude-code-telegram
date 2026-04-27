@@ -73,6 +73,23 @@ def test_allowed_users_parsing_with_spaces():
         assert settings.allowed_users == [123, 456, 789]
 
 
+def test_isolated_user_directories_extend_allowed_users(tmp_path):
+    """Users with isolated workspaces are whitelisted and get their own root."""
+    isolated_dir = tmp_path / "isolated"
+    settings = Settings(
+        telegram_bot_token="test_token",
+        telegram_bot_username="test_bot",
+        approved_directory=tmp_path,
+        allowed_users="123",
+        isolated_user_directories=f"456:{isolated_dir}",
+    )
+
+    assert settings.effective_allowed_users == [123, 456]
+    assert settings.approved_directory_for_user(456) == isolated_dir.resolve()
+    assert settings.approved_directory_for_user(123) == tmp_path.resolve()
+    assert settings.is_isolated_user(456) is True
+
+
 def test_security_relaxation_settings_defaults_and_overrides():
     """Security relaxation settings should default to False and be configurable."""
     with tempfile.TemporaryDirectory() as tmp_dir:

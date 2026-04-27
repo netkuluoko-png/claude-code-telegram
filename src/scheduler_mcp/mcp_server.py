@@ -43,9 +43,16 @@ def _database_path() -> Path:
 
 
 def _approved_directory() -> Path:
-    return Path(
-        os.environ.get("APPROVED_DIRECTORY", _DEFAULT_APPROVED_DIR)
-    ).resolve()
+    return Path(os.environ.get("APPROVED_DIRECTORY", _DEFAULT_APPROVED_DIR)).resolve()
+
+
+def _current_user_id() -> int:
+    return int(os.environ.get("SCHEDULER_DEFAULT_USER_ID", "0") or "0")
+
+
+def _owned_by_current_user(record: TaskRecord) -> bool:
+    user_id = _current_user_id()
+    return user_id <= 0 or record.created_by == user_id
 
 
 def _list_allowed_repos() -> Tuple[Path, List[Path]]:
@@ -114,15 +121,10 @@ def _describe_schedule(record: TaskRecord) -> str:
     if record.schedule_type == "cron":
         return f"cron '{record.cron_expression}'"
     if record.schedule_type == "random_daily":
-        skip = (
-            f" skip={record.skip_probability:.2f}"
-            if record.skip_probability
-            else ""
-        )
+        skip = f" skip={record.skip_probability:.2f}" if record.skip_probability else ""
         tz = record.timezone or "Europe/Kyiv"
         return (
-            f"random_daily [{record.window_start}-{record.window_end} {tz}]"
-            f"{skip}"
+            f"random_daily [{record.window_start}-{record.window_end} {tz}]" f"{skip}"
         )
     return record.schedule_type
 
@@ -133,11 +135,7 @@ def _format_task_line(record: TaskRecord) -> str:
     runs = f"{record.runs_count}" + (
         f"/{record.max_runs}" if record.max_runs is not None else ""
     )
-    chat = (
-        f" chat={record.target_chat_id}"
-        if record.target_chat_id is not None
-        else ""
-    )
+    chat = f" chat={record.target_chat_id}" if record.target_chat_id is not None else ""
     return (
         f"#{record.task_id} [{record.status}] '{record.task_name}'"
         f" — {schedule_descr}"
@@ -242,7 +240,10 @@ async def schedule_task(
     # MCP-spawn time; without them the worker falls back further to
     # created_by / NOTIFICATION_CHAT_IDS.
     effective_chat_id: Optional[int] = payload.target_chat_id
-    if effective_chat_id is None:
+    default_user_id = _current_user_id()
+    if default_user_id > 0:
+        effective_chat_id = default_user_id
+    elif effective_chat_id is None:
         env_chat = os.environ.get("SCHEDULER_DEFAULT_CHAT_ID")
         if env_chat:
             try:
@@ -299,6 +300,7 @@ async def list_tasks(status_filter: Optional[str] = None) -> str:
 
     await _store.ensure_schema()
     records = await _store.list(payload.status_filter)
+    records = [record for record in records if _owned_by_current_user(record)]
     if not records:
         scope = payload.status_filter or "active"
         return f"No {scope} tasks."
@@ -363,13 +365,13 @@ async def update_task(
             reactivate=reactivate,
         )
     except ValidationError as exc:
-        return (
-            f"Error: {exc.errors()[0]['msg']}" if exc.errors() else f"Error: {exc}"
-        )
+        return f"Error: {exc.errors()[0]['msg']}" if exc.errors() else f"Error: {exc}"
 
     await _store.ensure_schema()
     existing = await _store.get(payload.task_id)
     if existing is None:
+        return f"Error: task #{payload.task_id} not found."
+    if not _owned_by_current_user(existing):
         return f"Error: task #{payload.task_id} not found."
 
     updates: Dict[str, Any] = {}
@@ -403,9 +405,7 @@ async def update_task(
 
         if new_schedule_type == "once":
             run_at_dt = (
-                parse_iso_utc(payload.run_at)
-                if payload.run_at
-                else existing.run_at
+                parse_iso_utc(payload.run_at) if payload.run_at else existing.run_at
             )
             if run_at_dt is None:
                 return "Error: run_at is required for schedule_type='once'"
@@ -423,14 +423,9 @@ async def update_task(
         elif new_schedule_type == "cron":
             next_cron = payload.cron_expression or existing.cron_expression
             if not next_cron:
-                return (
-                    "Error: cron_expression is required for "
-                    "schedule_type='cron'"
-                )
+                return "Error: cron_expression is required for " "schedule_type='cron'"
         elif new_schedule_type == "random_daily":
-            next_window_start = (
-                payload.window_start or existing.window_start
-            )
+            next_window_start = payload.window_start or existing.window_start
             next_window_end = payload.window_end or existing.window_end
             if not next_window_start or not next_window_end:
                 return (
@@ -486,8 +481,11 @@ async def update_task(
         updates["working_directory"] = work_dir
 
     if payload.target_chat_id is not None:
+        default_user_id = _current_user_id()
         updates["target_chat_id"] = (
-            None if payload.target_chat_id == 0 else payload.target_chat_id
+            default_user_id
+            if default_user_id > 0
+            else (None if payload.target_chat_id == 0 else payload.target_chat_id)
         )
 
     if payload.reactivate is True and existing.status != "active":
@@ -541,13 +539,13 @@ async def delete_task(task_id: int) -> str:
     try:
         payload = DeleteTaskInput(task_id=task_id)
     except ValidationError as exc:
-        return (
-            f"Error: {exc.errors()[0]['msg']}" if exc.errors() else f"Error: {exc}"
-        )
+        return f"Error: {exc.errors()[0]['msg']}" if exc.errors() else f"Error: {exc}"
 
     await _store.ensure_schema()
     existing = await _store.get(payload.task_id)
     if existing is None:
+        return f"Error: task #{payload.task_id} not found."
+    if not _owned_by_current_user(existing):
         return f"Error: task #{payload.task_id} not found."
     if existing.status != "active":
         return (

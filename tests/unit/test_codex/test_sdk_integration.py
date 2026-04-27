@@ -77,6 +77,30 @@ def test_build_args_for_resume(tmp_path):
     assert "--image" in args
 
 
+def test_build_args_for_isolated_user_forces_workspace_sandbox(tmp_path):
+    manager = CodexCLIManager(
+        _settings(
+            tmp_path,
+            codex_sandbox_mode="danger-full-access",
+            isolated_user_directories={1594711146: tmp_path / "isolated"},
+        )
+    )
+
+    args = manager._build_args(
+        working_directory=tmp_path / "isolated",
+        session_id=None,
+        continue_session=False,
+        output_last_message=tmp_path / "last.txt",
+        image_paths=[],
+        model_override=None,
+        effort_override=None,
+        user_id=1594711146,
+    )
+
+    sandbox_idx = args.index("--sandbox")
+    assert args[sandbox_idx : sandbox_idx + 2] == ["--sandbox", "workspace-write"]
+
+
 def test_json_event_extractors():
     events = [
         {"type": "thread.started", "thread_id": "thread-abc"},

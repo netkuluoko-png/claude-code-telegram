@@ -109,8 +109,8 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     providers = []
 
     # Add whitelist provider if users are configured
-    if config.allowed_users:
-        providers.append(WhitelistAuthProvider(config.allowed_users))
+    if config.effective_allowed_users:
+        providers.append(WhitelistAuthProvider(config.effective_allowed_users))
 
     # Add token provider if enabled
     if config.enable_token_auth:
@@ -180,7 +180,9 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         event_bus=event_bus,
         claude_integration=agent_integration,
         default_working_directory=config.approved_directory,
-        default_user_id=config.allowed_users[0] if config.allowed_users else 0,
+        default_user_id=(
+            config.effective_allowed_users[0] if config.effective_allowed_users else 0
+        ),
     )
     agent_handler.register()
 

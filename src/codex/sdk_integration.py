@@ -83,6 +83,7 @@ class CodexCLIManager:
                 image_paths=image_paths,
                 model_override=model_override,
                 effort_override=effort_override,
+                user_id=user_id,
             )
 
             logger.info(
@@ -92,7 +93,7 @@ class CodexCLIManager:
                 continue_session=continue_session,
             )
 
-            await self._ensure_codex_mcp_config(working_directory)
+            await self._ensure_codex_mcp_config(working_directory, user_id=user_id)
 
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -223,9 +224,14 @@ class CodexCLIManager:
         image_paths: List[Path],
         model_override: Optional[str],
         effort_override: Optional[str],
+        user_id: int = 0,
     ) -> List[str]:
         binary = self.config.codex_cli_path or "codex"
-        sandbox = self.config.codex_sandbox_mode
+        sandbox = (
+            "workspace-write"
+            if self.config.is_isolated_user(user_id)
+            else self.config.codex_sandbox_mode
+        )
         args = [
             binary,
             "--ask-for-approval",
@@ -485,7 +491,9 @@ class CodexCLIManager:
         await self._ensure_codex_mcp_config(working_directory)
         return await self._mcp_manager.inspect_mcp_servers(working_directory)
 
-    async def _ensure_codex_mcp_config(self, working_directory: Path) -> None:
+    async def _ensure_codex_mcp_config(
+        self, working_directory: Path, user_id: int = 0
+    ) -> None:
         """Write the shared MCP server list into Codex config.toml."""
         bot_servers, project_servers = self._mcp_manager._build_mcp_servers(
             working_directory
@@ -496,6 +504,21 @@ class CodexCLIManager:
         mcp_servers: Dict[str, Any] = {}
         mcp_servers.update(project_servers)
         mcp_servers.update(bot_servers)
+        if user_id and "mcp-scheduler" in mcp_servers:
+            sched_cfg = mcp_servers["mcp-scheduler"]
+            sched_env = sched_cfg.setdefault("env", {})
+            sched_env["SCHEDULER_DEFAULT_USER_ID"] = str(user_id)
+            sched_env["SCHEDULER_DEFAULT_CHAT_ID"] = str(user_id)
+            sched_env["APPROVED_DIRECTORY"] = str(
+                self.config.approved_directory_for_user(user_id)
+            )
+        if user_id and self.config.is_isolated_user(user_id):
+            approved_directory = self.config.approved_directory_for_user(user_id)
+            if "process-manager" in mcp_servers:
+                proc_cfg = mcp_servers["process-manager"]
+                proc_env = proc_cfg.setdefault("env", {})
+                proc_env["PROCESS_NAMESPACE"] = f"user-{user_id}"
+                proc_env["PROCESS_APPROVED_DIRECTORY"] = str(approved_directory)
         if not mcp_servers:
             return
 

@@ -354,6 +354,13 @@ class ClaudeSDKManager:
         )
 
         try:
+            approved_directory = self.config.approved_directory_for_user(user_id)
+            sandbox_excluded_commands = (
+                []
+                if self.config.is_isolated_user(user_id)
+                else self.config.sandbox_excluded_commands or []
+            )
+
             # Capture stderr from Claude CLI for better error diagnostics
             stderr_lines: List[str] = []
 
@@ -367,9 +374,7 @@ class ClaudeSDKManager:
                 "Use relative paths."
             )
             base_prompt += "\n\n" + _current_time_prompt_fragment()
-            base_prompt += "\n\n" + _allowed_repos_prompt_fragment(
-                self.config.approved_directory
-            )
+            base_prompt += "\n\n" + _allowed_repos_prompt_fragment(approved_directory)
             claude_md_path = Path(working_directory) / "CLAUDE.md"
             if claude_md_path.exists():
                 base_prompt += "\n\n" + claude_md_path.read_text(encoding="utf-8")
@@ -401,7 +406,7 @@ class ClaudeSDKManager:
                 sandbox={
                     "enabled": self.config.sandbox_enabled,
                     "autoAllowBashIfSandboxed": True,
-                    "excludedCommands": self.config.sandbox_excluded_commands or [],
+                    "excludedCommands": sandbox_excluded_commands,
                 },
                 system_prompt=base_prompt,
                 setting_sources=["project", "user"],
@@ -438,6 +443,14 @@ class ClaudeSDKManager:
                 sched_env = sched_cfg.setdefault("env", {})
                 sched_env.setdefault("SCHEDULER_DEFAULT_USER_ID", str(user_id))
                 sched_env.setdefault("SCHEDULER_DEFAULT_CHAT_ID", str(user_id))
+                sched_env.setdefault("APPROVED_DIRECTORY", str(approved_directory))
+
+            if user_id and self.config.is_isolated_user(user_id):
+                if "process-manager" in mcp_servers:
+                    proc_cfg = mcp_servers["process-manager"]
+                    proc_env = proc_cfg.setdefault("env", {})
+                    proc_env["PROCESS_NAMESPACE"] = f"user-{user_id}"
+                    proc_env["PROCESS_APPROVED_DIRECTORY"] = str(approved_directory)
 
             if mcp_servers:
                 options.mcp_servers = mcp_servers
@@ -462,7 +475,7 @@ class ClaudeSDKManager:
                 options.can_use_tool = _make_can_use_tool_callback(
                     security_validator=self.security_validator,
                     working_directory=working_directory,
-                    approved_directory=self.config.approved_directory,
+                    approved_directory=approved_directory,
                 )
 
             # Resume previous session if we have a session_id
@@ -888,11 +901,7 @@ class ClaudeSDKManager:
 
         # Build desired MCP config
         desired: Dict[str, Any] = {
-            "permissions": {
-                "allow": [
-                    f"mcp__{name}__*" for name in mcp_servers
-                ]
-            },
+            "permissions": {"allow": [f"mcp__{name}__*" for name in mcp_servers]},
             "mcpServers": mcp_servers,
         }
 
@@ -1000,9 +1009,10 @@ class ClaudeSDKManager:
 
         existing_approved = entry.get("enabledMcpjsonServers") or []
         merged = sorted(set(existing_approved) | set(approved))
-        if merged == sorted(existing_approved) and entry.get(
-            "hasTrustDialogAccepted"
-        ) is True:
+        if (
+            merged == sorted(existing_approved)
+            and entry.get("hasTrustDialogAccepted") is True
+        ):
             return
 
         entry["enabledMcpjsonServers"] = merged
@@ -1183,9 +1193,7 @@ cache them.
                 error=str(e),
             )
 
-    async def _ensure_mcp_deps(
-        self, server_name: str, cfg: Dict[str, Any]
-    ) -> None:
+    async def _ensure_mcp_deps(self, server_name: str, cfg: Dict[str, Any]) -> None:
         """Install `requirements.txt` next to a project MCP into a persistent
         cache, and prepend it to the server's PYTHONPATH.
 
@@ -1275,9 +1283,7 @@ cache them.
                 marker.write_text(req_hash)
             except OSError:
                 pass
-            logger.info(
-                "MCP deps ready", server=server_name, target=str(target)
-            )
+            logger.info("MCP deps ready", server=server_name, target=str(target))
 
         env = cfg.get("env")
         if not isinstance(env, dict):
@@ -1364,9 +1370,7 @@ cache them.
                 )
             except asyncio.TimeoutError:
                 entry["error"] = "timed out after 10s"
-                logger.warning(
-                    "MCP inspect timeout", server=name, origin=origin
-                )
+                logger.warning("MCP inspect timeout", server=name, origin=origin)
             except Exception as e:
                 err_msg = f"{type(e).__name__}: {e}"
                 # Truncate long errors so they fit Telegram HTML rendering
@@ -1457,9 +1461,7 @@ cache them.
                         ),
                         lines[-1] if lines else "",
                     )
-                    raise RuntimeError(
-                        f"{type(inner).__name__}: {picked}"
-                    ) from inner
+                    raise RuntimeError(f"{type(inner).__name__}: {picked}") from inner
                 raise RuntimeError(f"{type(inner).__name__}: {inner}") from inner
 
     def _load_mcp_config(self, config_path: Path) -> Dict[str, Any]:

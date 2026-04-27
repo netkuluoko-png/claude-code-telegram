@@ -7,7 +7,7 @@
 # is empty (first deploy / fresh volume).
 
 # Fix volume permissions (Railway volumes mount as root)
-mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/.claude/projects /app/data/.codex /app/data/project
+mkdir -p /app/data /app/data/proc_logs /app/data/.claude /app/data/.claude/projects /app/data/.codex /app/data/project /app/data/isolated-users/1594711146
 chown -R claude:claude /app/data
 
 # Seed /app/data/project from the image's tarball the first time the volume

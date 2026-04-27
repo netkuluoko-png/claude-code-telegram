@@ -180,6 +180,7 @@ class MessageOrchestrator:
                 context.bot_data[key] = value
             context.bot_data["settings"] = self.settings
             context.user_data.pop("_thread_context", None)
+            self._apply_user_workspace(update, context)
 
             is_sync_bypass = handler.__name__ == "sync_threads"
             is_start_bypass = handler.__name__ in {"start_command", "agentic_start"}
@@ -198,6 +199,7 @@ class MessageOrchestrator:
                 allowed = await self._apply_thread_routing_context(update, context)
                 if not allowed:
                     return
+                self._apply_user_workspace(update, context)
 
             if update.effective_user and "agent_backend" not in context.user_data:
                 persisted = self._load_persisted_agent_backend(update.effective_user.id)
@@ -214,6 +216,46 @@ class MessageOrchestrator:
                     self._persist_thread_state(context)
 
         return wrapped
+
+    def _approved_directory_for_user(self, user_id: Optional[int]) -> Path:
+        """Return and create the filesystem root for this Telegram user."""
+        if user_id is None:
+            return self.settings.approved_directory
+        root = self.settings.approved_directory_for_user(user_id)
+        if self.settings.is_isolated_user(user_id):
+            root.mkdir(parents=True, exist_ok=True)
+        return root.resolve()
+
+    def _approved_directory_for_context(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> Path:
+        root = context.user_data.get("approved_directory")
+        if isinstance(root, Path):
+            return root
+        user_id = update.effective_user.id if update.effective_user else None
+        return self._approved_directory_for_user(user_id)
+
+    def _apply_user_workspace(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Keep current_directory inside the user's allowed workspace root."""
+        user_id = update.effective_user.id if update.effective_user else None
+        root = self._approved_directory_for_user(user_id)
+        context.user_data["approved_directory"] = root
+        self._clamp_current_directory(context, root)
+
+    def _clamp_current_directory(
+        self, context: ContextTypes.DEFAULT_TYPE, root: Path
+    ) -> None:
+        """Reset current_directory if it escapes the supplied root."""
+
+        current = context.user_data.get("current_directory")
+        if not isinstance(current, Path):
+            current = Path(str(current)) if current else root
+        current = current.resolve()
+        if not self._is_within(current, root) or not current.is_dir():
+            current = root
+        context.user_data["current_directory"] = current
 
     def _get_agent_backend(self, context: ContextTypes.DEFAULT_TYPE) -> str:
         """Return the user's active agent backend."""
@@ -718,9 +760,8 @@ class MessageOrchestrator:
                     return
                 except Exception:
                     sync_line = "\n\n🧵 Topic sync failed. Run /sync_threads to retry."
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
+        approved_directory = self._approved_directory_for_context(update, context)
+        current_dir = context.user_data.get("current_directory", approved_directory)
         dir_display = f"<code>{current_dir}/</code>"
 
         safe_name = escape_html(user.first_name)
@@ -837,9 +878,8 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Compact one-line status, no buttons."""
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
+        approved_directory = self._approved_directory_for_context(update, context)
+        current_dir = context.user_data.get("current_directory", approved_directory)
         dir_display = str(current_dir)
 
         session_id = context.user_data.get("claude_session_id")
@@ -1820,9 +1860,8 @@ class MessageOrchestrator:
             )
             return
 
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
+        approved_directory = self._approved_directory_for_context(update, context)
+        current_dir = context.user_data.get("current_directory", approved_directory)
         session_id = context.user_data.get("claude_session_id")
 
         # Check if /new was used — skip auto-resume for this first message.
@@ -1854,7 +1893,7 @@ class MessageOrchestrator:
             reply_markup=stop_kb,
             mcp_images=mcp_images,
             mcp_files=mcp_files,
-            approved_directory=self.settings.approved_directory,
+            approved_directory=approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
         )
@@ -1902,6 +1941,7 @@ class MessageOrchestrator:
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
             )
+            self._clamp_current_directory(context, approved_directory)
 
             # Store interaction
             storage = context.bot_data.get("storage")
@@ -2124,9 +2164,8 @@ class MessageOrchestrator:
             )
             return
 
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
+        approved_directory = self._approved_directory_for_context(update, context)
+        current_dir = context.user_data.get("current_directory", approved_directory)
         session_id = context.user_data.get("claude_session_id")
 
         # Check if /new was used — skip auto-resume for this first message.
@@ -2142,7 +2181,7 @@ class MessageOrchestrator:
             tool_log,
             time.time(),
             mcp_images=mcp_images_doc,
-            approved_directory=self.settings.approved_directory,
+            approved_directory=approved_directory,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -2168,6 +2207,7 @@ class MessageOrchestrator:
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
             )
+            self._clamp_current_directory(context, approved_directory)
 
             from .utils.formatting import ResponseFormatter
 
@@ -2338,9 +2378,8 @@ class MessageOrchestrator:
             )
             return
 
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
+        approved_directory = self._approved_directory_for_context(update, context)
+        current_dir = context.user_data.get("current_directory", approved_directory)
         session_id = context.user_data.get("claude_session_id")
         force_new = bool(context.user_data.get("force_new_session"))
 
@@ -2353,7 +2392,7 @@ class MessageOrchestrator:
             tool_log,
             time.time(),
             mcp_images=mcp_images_media,
-            approved_directory=self.settings.approved_directory,
+            approved_directory=approved_directory,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -2382,6 +2421,7 @@ class MessageOrchestrator:
         _update_working_directory_from_claude_response(
             claude_response, context, self.settings, user_id
         )
+        self._clamp_current_directory(context, approved_directory)
 
         from .utils.formatting import ResponseFormatter
 
@@ -2477,7 +2517,7 @@ class MessageOrchestrator:
         /repo <name>   — switch to that directory, resume session if available
         """
         args = update.message.text.split()[1:] if update.message.text else []
-        base = self.settings.approved_directory
+        base = self._approved_directory_for_context(update, context)
         current_dir = context.user_data.get("current_directory", base)
 
         if args:
@@ -2487,9 +2527,9 @@ class MessageOrchestrator:
                 target_path = base
                 display_name = "base"
             else:
-                target_path = base / target_name
+                target_path = (base / target_name).resolve()
                 display_name = target_name
-            if not target_path.is_dir():
+            if not self._is_within(target_path, base) or not target_path.is_dir():
                 await update.message.reply_text(
                     f"Directory not found: <code>{escape_html(target_name)}</code>",
                     parse_mode="HTML",
@@ -2582,7 +2622,7 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show MCP servers visible to the current session, with tool lists."""
-        base = self.settings.approved_directory
+        base = self._approved_directory_for_context(update, context)
         current_dir: Path = context.user_data.get("current_directory", base)
 
         claude_integration = context.bot_data.get("claude_integration")
@@ -2659,10 +2699,18 @@ class MessageOrchestrator:
 
     # ── /process: background process management ────────────────────────
 
-    def _get_pm(self) -> "ProcessManager":  # type: ignore[name-defined]
+    def _get_pm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> "ProcessManager":  # type: ignore[name-defined]
         from src.process.manager import ProcessManager
 
-        return ProcessManager()
+        user_id = update.effective_user.id if update.effective_user else 0
+        approved_directory = self._approved_directory_for_context(update, context)
+        namespace = (
+            f"user-{user_id}" if self.settings.is_isolated_user(user_id) else None
+        )
+        approved = str(approved_directory) if namespace else None
+        return ProcessManager(namespace=namespace, approved_directory=approved)
 
     async def process_dispatch(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2676,13 +2724,13 @@ class MessageOrchestrator:
         if sub == "run":
             await self._proc_run(update, context, rest)
         elif sub == "ps":
-            await self._proc_ps(update)
+            await self._proc_ps(update, context)
         elif sub == "kill":
-            await self._proc_kill(update, rest)
+            await self._proc_kill(update, context, rest)
         elif sub == "logs":
-            await self._proc_logs(update, rest)
+            await self._proc_logs(update, context, rest)
         elif sub == "cleanup":
-            pm = self._get_pm()
+            pm = self._get_pm(update, context)
             c = pm.cleanup_dead()
             await update.message.reply_text(f"Removed {c} dead process(es).")
         else:
@@ -2716,10 +2764,9 @@ class MessageOrchestrator:
                 )
                 return
 
-        cwd = str(
-            context.user_data.get("current_directory", self.settings.approved_directory)
-        )
-        pm = self._get_pm()
+        base = self._approved_directory_for_context(update, context)
+        cwd = str(context.user_data.get("current_directory", base))
+        pm = self._get_pm(update, context)
         try:
             entry = pm.start(command, cwd, name)
             await update.message.reply_text(
@@ -2732,8 +2779,10 @@ class MessageOrchestrator:
         except Exception as e:
             await update.message.reply_text(f"Failed: {e}")
 
-    async def _proc_ps(self, update: Update) -> None:
-        pm = self._get_pm()
+    async def _proc_ps(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        pm = self._get_pm(update, context)
         procs = pm.list_all()
         if not procs:
             await update.message.reply_text("No processes.")
@@ -2767,11 +2816,13 @@ class MessageOrchestrator:
             "\n".join(lines), parse_mode="HTML", reply_markup=markup
         )
 
-    async def _proc_kill(self, update: Update, args: str) -> None:
+    async def _proc_kill(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
         if not args or not args.strip().isdigit():
             await update.message.reply_text("Usage: /process kill <id>")
             return
-        pm = self._get_pm()
+        pm = self._get_pm(update, context)
         entry = pm.kill(int(args.strip()))
         if entry:
             await update.message.reply_text(
@@ -2781,11 +2832,13 @@ class MessageOrchestrator:
         else:
             await update.message.reply_text(f"Process #{args.strip()} not found.")
 
-    async def _proc_logs(self, update: Update, args: str) -> None:
+    async def _proc_logs(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, args: str
+    ) -> None:
         if not args or not args.strip().isdigit():
             await update.message.reply_text("Usage: /process logs <id>")
             return
-        pm = self._get_pm()
+        pm = self._get_pm(update, context)
         entry = pm.get(int(args.strip()))
         if not entry:
             await update.message.reply_text(f"Process #{args.strip()} not found.")
@@ -2804,7 +2857,7 @@ class MessageOrchestrator:
         query = update.callback_query
         await query.answer()
         proc_id = int(query.data.split(":", 1)[1])
-        pm = self._get_pm()
+        pm = self._get_pm(update, context)
         entry = pm.get(proc_id)
         if not entry:
             await query.message.reply_text(f"Process #{proc_id} not found.")
@@ -2820,7 +2873,7 @@ class MessageOrchestrator:
     ) -> None:
         query = update.callback_query
         proc_id = int(query.data.split(":", 1)[1])
-        pm = self._get_pm()
+        pm = self._get_pm(update, context)
         entry = pm.kill(proc_id)
         if entry:
             await query.answer(f"#{proc_id} killed")
@@ -2852,9 +2905,10 @@ class MessageOrchestrator:
         user_id = (
             target.from_user.id if hasattr(target, "from_user") else target.chat.id
         )
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
+        base = context.user_data.get(
+            "approved_directory", self.settings.approved_directory
         )
+        current_dir = context.user_data.get("current_directory", base)
         current_session_id = context.user_data.get("claude_session_id")
 
         claude_integration = context.bot_data.get("claude_integration")
@@ -2876,11 +2930,7 @@ class MessageOrchestrator:
         sessions = [s for s in all_sessions if str(s.project_path) == str(current_dir)]
 
         if not sessions:
-            rel = (
-                current_dir.name
-                if current_dir != self.settings.approved_directory
-                else str(current_dir)
-            )
+            rel = current_dir.name if current_dir != base else str(current_dir)
             text = f"No sessions for <code>{escape_html(rel)}/</code>"
             if edit:
                 await target.edit_message_text(text, parse_mode="HTML")
@@ -2915,11 +2965,7 @@ class MessageOrchestrator:
         page = max(0, min(page, max_page))
         page_sessions = sessions[page * ps : (page + 1) * ps]
 
-        rel_dir = (
-            current_dir.name
-            if current_dir != self.settings.approved_directory
-            else str(current_dir)
-        )
+        rel_dir = current_dir.name if current_dir != base else str(current_dir)
         lines = [
             f"<b>Sessions for</b> <code>{escape_html(rel_dir)}/</code>"
             f" ({total} total \u00b7 page {page + 1}/{max_page + 1})\n"
@@ -3088,15 +3134,15 @@ class MessageOrchestrator:
         data = query.data
         _, project_name = data.split(":", 1)
 
-        base = self.settings.approved_directory
+        base = self._approved_directory_for_context(update, context)
         if project_name in ("/", ".", "..", "~", "base", ""):
             new_path = base
             display_name = "base"
         else:
-            new_path = base / project_name
+            new_path = (base / project_name).resolve()
             display_name = project_name
 
-        if not new_path.is_dir():
+        if not self._is_within(new_path, base) or not new_path.is_dir():
             await query.edit_message_text(
                 f"Directory not found: <code>{escape_html(display_name)}</code>",
                 parse_mode="HTML",

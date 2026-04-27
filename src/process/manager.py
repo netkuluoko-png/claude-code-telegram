@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import signal
+import shlex
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -24,6 +25,7 @@ class ProcessEntry:
     cwd: str
     pid: int
     started_at: float
+    log_dir: str = str(LOGS_DIR)
 
     @property
     def is_alive(self) -> bool:
@@ -50,7 +52,7 @@ class ProcessEntry:
 
     @property
     def log_path(self) -> Path:
-        return LOGS_DIR / f"{self.id}.log"
+        return Path(self.log_dir) / f"{self.id}.log"
 
     def last_logs(self, lines: int = 30) -> str:
         if not self.log_path.exists():
@@ -63,23 +65,43 @@ class ProcessEntry:
             return "(error reading logs)"
 
 
+def _safe_namespace(value: str) -> str:
+    return "".join(ch for ch in value if ch.isalnum() or ch in ("-", "_")) or "default"
+
+
 class ProcessManager:
     """Manages background processes with file-based state (shared across bot & MCP)."""
 
-    def __init__(self) -> None:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        namespace: Optional[str] = None,
+        approved_directory: Optional[str | Path] = None,
+    ) -> None:
+        namespace = namespace or os.environ.get("PROCESS_NAMESPACE") or "default"
+        self.namespace = _safe_namespace(namespace)
+        approved = approved_directory or os.environ.get("PROCESS_APPROVED_DIRECTORY")
+        self.approved_directory = Path(approved).resolve() if approved else None
+        self.state_file = (
+            STATE_FILE
+            if self.namespace == "default"
+            else STATE_FILE.with_name(f"processes-{self.namespace}.json")
+        )
+        self.logs_dir = (
+            LOGS_DIR if self.namespace == "default" else LOGS_DIR / self.namespace
+        )
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_state(self) -> dict:
-        if STATE_FILE.exists():
+        if self.state_file.exists():
             try:
-                return json.loads(STATE_FILE.read_text())
+                return json.loads(self.state_file.read_text())
             except (json.JSONDecodeError, OSError):
                 return {"next_id": 1, "processes": {}}
         return {"next_id": 1, "processes": {}}
 
     def _save_state(self, state: dict) -> None:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2))
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps(state, indent=2))
 
     def _entry_from_dict(self, d: dict) -> ProcessEntry:
         return ProcessEntry(
@@ -89,21 +111,65 @@ class ProcessManager:
             cwd=d["cwd"],
             pid=d["pid"],
             started_at=d["started_at"],
+            log_dir=d.get("log_dir", str(self.logs_dir)),
         )
+
+    def _validate_cwd(self, cwd: str) -> Path:
+        resolved = Path(cwd).resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"cwd does not exist: {cwd}")
+        if self.approved_directory:
+            try:
+                resolved.relative_to(self.approved_directory)
+            except ValueError as exc:
+                raise ValueError(
+                    f"cwd is outside approved directory: {self.approved_directory}"
+                ) from exc
+        return resolved
+
+    def _validate_command_paths(self, command: str, cwd: Path) -> None:
+        if not self.approved_directory:
+            return
+        try:
+            tokens = shlex.split(command)
+        except ValueError as exc:
+            raise ValueError(f"command could not be parsed safely: {exc}") from exc
+
+        for token in tokens:
+            if (
+                token.startswith("-")
+                or "=" in token
+                and not token.startswith(("/", "."))
+            ):
+                continue
+            looks_like_path = token.startswith(("/", "./", "../")) or "/" in token
+            if not looks_like_path:
+                continue
+            path = Path(token)
+            resolved = path.resolve() if path.is_absolute() else (cwd / path).resolve()
+            try:
+                resolved.relative_to(self.approved_directory)
+            except ValueError as exc:
+                raise ValueError(
+                    f"command path is outside approved directory: {token}"
+                ) from exc
 
     def start(self, command: str, cwd: str, name: str = "") -> ProcessEntry:
         """Start a background process."""
+        resolved_cwd = self._validate_cwd(cwd)
+        self._validate_command_paths(command, resolved_cwd)
+
         state = self._load_state()
         proc_id = state["next_id"]
         state["next_id"] = proc_id + 1
 
-        log_path = LOGS_DIR / f"{proc_id}.log"
+        log_path = self.logs_dir / f"{proc_id}.log"
 
         with open(log_path, "w") as log_file:
             proc = subprocess.Popen(
                 command,
                 shell=True,
-                cwd=cwd,
+                cwd=str(resolved_cwd),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -116,9 +182,10 @@ class ProcessManager:
             id=proc_id,
             name=name,
             command=command,
-            cwd=cwd,
+            cwd=str(resolved_cwd),
             pid=proc.pid,
             started_at=time.time(),
+            log_dir=str(self.logs_dir),
         )
 
         entry_dict = asdict(entry)
@@ -171,7 +238,7 @@ class ProcessManager:
         if key in state["processes"]:
             del state["processes"][key]
             self._save_state(state)
-            log = LOGS_DIR / f"{proc_id}.log"
+            log = self.logs_dir / f"{proc_id}.log"
             if log.exists():
                 log.unlink()
             return True
@@ -179,10 +246,13 @@ class ProcessManager:
 
     def cleanup_dead(self) -> int:
         state = self._load_state()
-        dead = [k for k, d in state["processes"].items()
-                if not self._entry_from_dict(d).is_alive]
+        dead = [
+            k
+            for k, d in state["processes"].items()
+            if not self._entry_from_dict(d).is_alive
+        ]
         for k in dead:
-            log = LOGS_DIR / f"{k}.log"
+            log = self.logs_dir / f"{k}.log"
             if log.exists():
                 log.unlink()
             del state["processes"][k]
@@ -212,7 +282,7 @@ class ProcessManager:
                 "Restoring process #%d '%s': %s", entry.id, entry.name, entry.command
             )
 
-            log_path = LOGS_DIR / f"{entry.id}.log"
+            log_path = self.logs_dir / f"{entry.id}.log"
             try:
                 with open(log_path, "a") as log_file:
                     log_file.write(
